@@ -17,7 +17,7 @@ class Config:
         self.openrouter_api_key = self._get_runtime_setting("OPENROUTER_API_KEY")
         self.openrouter_fallback_model = self._get_optional_env("OPENROUTER_FALLBACK_MODEL") or "openai/gpt-6-luna"
         self.anthropic_api_key = self._get_runtime_setting("ANTHROPIC_API_KEY")
-        self.google_api_key = self._get_runtime_setting("GOOGLE_API_KEY")
+        self.google_api_key = self._get_runtime_setting("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         self.youtube_data_api_key = self._get_runtime_setting("YOUTUBE_DATA_API_KEY")
         self.ollama_base_url = self._get_runtime_setting("OLLAMA_BASE_URL")
         self.ollama_api_key = self._get_runtime_setting("OLLAMA_API_KEY")
@@ -98,20 +98,18 @@ class Config:
             os.getenv("APIFY_LONG_VIDEO_SECONDS", "1800")
         )
 
-        self.max_video_duration = int(os.getenv("MAX_VIDEO_DURATION", "5400"))
+        self.max_video_duration = int(os.getenv("MAX_VIDEO_DURATION", "86400"))
         # YouTube sources can be longer on paid tiers. Uploads continue to use
         # max_video_duration regardless of plan.
         self.pro_youtube_max_video_duration = int(
             os.getenv("PRO_YOUTUBE_MAX_VIDEO_DURATION", str(self.max_video_duration))
         )
         self.scale_youtube_max_video_duration = int(
-            os.getenv("SCALE_YOUTUBE_MAX_VIDEO_DURATION", "10800")
+            os.getenv("SCALE_YOUTUBE_MAX_VIDEO_DURATION", str(self.max_video_duration))
         )
-        # 4 GB fits a full-length upload (the duration cap is 90 minutes) at a
-        # normal 1080p bitrate. Larger files make transcription, storage, and
-        # rendering slow and fragile.
+        self.video_job_timeout = int(os.getenv("VIDEO_JOB_TIMEOUT", "86400"))
         self.max_video_upload_bytes = int(
-            os.getenv("MAX_VIDEO_UPLOAD_BYTES", "4000000000")
+            os.getenv("MAX_VIDEO_UPLOAD_BYTES", "50000000000")
         )
         self.output_dir = os.getenv("OUTPUT_DIR", "outputs")
 

@@ -219,6 +219,7 @@ def create_app(
             "name": "SupoClip API",
             "version": "0.2.0",
             "status": "running",
+            "web_ui": "http://localhost:3107",
             "docs": "/docs",
             "architecture": "job queue",
         }

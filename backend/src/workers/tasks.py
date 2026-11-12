@@ -360,7 +360,7 @@ class WorkerSettings:
 
     # Retry settings
     max_tries = 3  # Retry failed jobs up to 3 times
-    job_timeout = 10800  # 3 hour timeout for video processing
+    job_timeout = int(os.getenv("VIDEO_JOB_TIMEOUT", "86400"))  # 24 hour timeout for video processing
 
     # Worker pool settings. Cron jobs live on CronWorkerSettings so they never
     # take one of these slots or pile up behind a long render.

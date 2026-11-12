@@ -891,11 +891,11 @@ def get_video_duration(url: str) -> Optional[int]:
 
 
 def is_video_suitable_for_processing(
-    url: str, min_duration: int = 60, max_duration: int = 7200
+    url: str, min_duration: int = 60, max_duration: int = 86400
 ) -> bool:
     """
     Check if video is suitable for processing based on duration and other factors.
-    Default limits: 1 minute to 2 hours.
+    Default limits: 1 minute to 24 hours.
     """
     video_info = get_youtube_video_info(url)
     if not video_info:

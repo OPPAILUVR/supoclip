@@ -7,8 +7,10 @@ from typing import List, Dict, Any, Optional, Literal
 import asyncio
 import logging
 import math
+import os
 import random
 import re
+import shutil
 
 import httpx
 from pydantic_ai import Agent, NativeOutput
@@ -439,15 +441,109 @@ def build_transcript_system_prompt(clip_length: str = "auto") -> str:
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
 _transcript_agent_signature: Optional[tuple[str | None, ...]] = None
 
-SUPPORTED_LLM_PROVIDERS = {"google", "google-gla", "openai", "openrouter", "anthropic", "ollama"}
+SUPPORTED_LLM_PROVIDERS = {"google", "google-gla", "openai", "openrouter", "anthropic", "ollama", "antigravity"}
 
 
 def _split_llm_name(model_name: str) -> tuple[str, str | None]:
+    if not model_name:
+        return "antigravity", "gemini-3-flash-preview"
+    stripped = model_name.strip().lower()
+    if stripped == "antigravity":
+        return "antigravity", "gemini-3-flash-preview"
     if ":" not in model_name:
-        return model_name.strip().lower(), None
+        return stripped, None
 
     provider, provider_model_name = model_name.split(":", 1)
     return provider.strip().lower(), provider_model_name.strip() or None
+
+
+import json
+import subprocess
+from pydantic_ai.messages import ModelResponse, TextPart, SystemPromptPart, UserPromptPart
+
+
+class AntigravityDirectModel(Model):
+    """Direct bridge to the local Antigravity hub via agentapi."""
+
+    def __init__(self, model_name: str = "antigravity"):
+        self._model_name = model_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def system(self) -> str:
+        return "antigravity"
+
+    async def request(self, messages, model_settings, model_request_parameters):
+        prompt_parts = []
+        for m in messages:
+            for p in getattr(m, "parts", []):
+                content = getattr(p, "content", None)
+                if content is not None:
+                    prompt_parts.append(str(content))
+
+        combined_prompt = "\n\n".join(prompt_parts)
+        if "JSON" not in combined_prompt and "json" not in combined_prompt:
+            combined_prompt += "\n\nRespond with valid JSON only."
+
+        loop = asyncio.get_running_loop()
+        agentapi_bin = "/Users/luv/.gemini/antigravity/bin/agentapi"
+        if not Path(agentapi_bin).exists():
+            import shutil
+            agentapi_bin = shutil.which("agentapi") or "agentapi"
+
+        def _invoke():
+            cmd = [agentapi_bin, "new-conversation", "--model=flash", combined_prompt]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                logger.error("agentapi failed (code %d):\nSTDOUT: %s\nSTDERR: %s", res.returncode, res.stdout, res.stderr)
+                raise RuntimeError(f"agentapi failed ({res.returncode}): {res.stderr or res.stdout}")
+            return res
+
+        res = await loop.run_in_executor(None, _invoke)
+        data = json.loads(res.stdout)
+        convo_id = data["response"]["newConversation"]["conversationId"]
+
+        logs_dir = Path.home() / f".gemini/antigravity/brain/{convo_id}/.system_generated/logs"
+        transcript_full_path = logs_dir / "transcript_full.jsonl"
+        transcript_path = logs_dir / "transcript.jsonl"
+        for _ in range(720):
+            await asyncio.sleep(0.5)
+            # Prefer transcript_full.jsonl to avoid truncation of content > 4KB
+            active_file = transcript_full_path if transcript_full_path.exists() else (transcript_path if transcript_path.exists() else None)
+            if active_file:
+                try:
+                    lines = active_file.read_text().strip().split("\n")
+                except Exception:
+                    continue
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("source") == "MODEL" and entry.get("status") == "DONE":
+                        # If active_file was compact transcript and field was truncated, read full if available
+                        if entry.get("truncated_fields") and "content" in entry["truncated_fields"] and transcript_full_path.exists():
+                            try:
+                                full_lines = transcript_full_path.read_text().strip().split("\n")
+                                for f_line in full_lines:
+                                    f_entry = json.loads(f_line)
+                                    if f_entry.get("step_index") == entry.get("step_index"):
+                                        entry = f_entry
+                                        break
+                            except Exception:
+                                pass
+                        content = entry.get("content", "")
+                        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+                        if fence_match:
+                            content = fence_match.group(1).strip()
+                        return ModelResponse(parts=[TextPart(content)])
+
+        raise TimeoutError("Antigravity model did not respond within timeout")
 
 
 def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optional[str]:
@@ -457,19 +553,23 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
     if provider not in SUPPORTED_LLM_PROVIDERS:
         return (
             f"Unsupported LLM provider '{provider}'. "
-            "Use google-gla:*, openai:*, openrouter:*, anthropic:*, or ollama:*."
+            "Use antigravity, google-gla:*, openai:*, openrouter:*, anthropic:*, or ollama:*."
         )
 
-    if not provider_model_name:
+    if not provider_model_name and provider != "antigravity":
         return (
             "Selected LLM is missing a model name. "
-            "Use the format provider:model, for example ollama:gpt-oss:20b."
+            "Use the format provider:model, for example antigravity:gemini-3-flash-preview or ollama:gpt-oss:20b."
         )
 
-    if provider in {"google", "google-gla"} and not runtime_config.google_api_key:
+    if provider == "antigravity":
+        # Antigravity uses the local Antigravity agent hub directly; no API key needed.
+        return None
+
+    if provider in {"google", "google-gla"} and not (runtime_config.google_api_key or os.getenv("GEMINI_API_KEY")):
         return (
             "Selected LLM provider is Google, but GOOGLE_API_KEY is not set. "
-            "Set GOOGLE_API_KEY or set LLM to openai:* / anthropic:* / ollama:* with the matching API key."
+            "Set GOOGLE_API_KEY or set LLM to antigravity (to use local Antigravity without an API key)."
         )
 
     if provider == "openrouter" and not runtime_config.openrouter_api_key:
@@ -542,6 +642,17 @@ def _build_transcript_model(
                 "max_tokens": 8192,
             },
         )
+    if provider == "antigravity":
+        # If an external Google/Gemini key is configured, use the GLA endpoint directly.
+        # Otherwise, connect directly to the local Antigravity hub (zero API key needed).
+        if runtime_config.google_api_key or os.getenv("GEMINI_API_KEY"):
+            model = provider_model_name or "gemini-3-flash-preview"
+            if model in {"flash", "flash-preview", "default"}:
+                model = "gemini-3-flash-preview"
+            elif model in {"pro", "pro-preview"}:
+                model = "gemini-2.5-pro"
+            return f"google-gla:{model}"
+        return AntigravityDirectModel(model_name)
     if provider != "ollama":
         return model_name
 
@@ -1459,8 +1570,9 @@ async def _analyze_transcript_windows(
             return result.output
 
     tasks = [asyncio.create_task(run_window(window)) for window in windows]
+    total_timeout = max(ANALYSIS_TOTAL_TIMEOUT_SECONDS, len(windows) * 300)
     try:
-        _, pending = await asyncio.wait(tasks, timeout=ANALYSIS_TOTAL_TIMEOUT_SECONDS)
+        _, pending = await asyncio.wait(tasks, timeout=total_timeout)
     except asyncio.CancelledError:
         for task in tasks:
             task.cancel()
@@ -1471,7 +1583,7 @@ async def _analyze_transcript_windows(
             "%d of %d analysis windows exceeded the %ss budget",
             len(pending),
             len(windows),
-            ANALYSIS_TOTAL_TIMEOUT_SECONDS,
+            total_timeout,
         )
         for task in pending:
             task.cancel()

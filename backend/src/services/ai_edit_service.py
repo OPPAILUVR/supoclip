@@ -25,7 +25,7 @@ from .ai_edit_allowance_service import refund_ai_edit_usage
 
 logger = logging.getLogger(__name__)
 
-AI_EDIT_MODEL = "claude-sonnet-5-5"
+AI_EDIT_MODEL = "antigravity"
 AI_EDIT_QUEUE = "supoclip_ai"
 AI_EDIT_TIMEOUT_SECONDS = 120
 AI_EDIT_RESULT_TTL_SECONDS = 3600
@@ -606,9 +606,85 @@ async def _plan_edit_ollama(context: str, model: str) -> EditPlan:
     return result
 
 
+async def _plan_edit_antigravity(context: str) -> EditPlan:
+    """Plan edit using the local Antigravity hub with zero external API keys."""
+    import re
+    import subprocess
+    from pathlib import Path
+
+    local_system = (
+        SYSTEM_PROMPT
+        + '\n\nReturn only the JSON plan. Every set operation value is a JSON string, including booleans and numbers. Examples: {"type":"set","setting":"captions.uppercase","value":"true"}, {"type":"set","setting":"audio.volume","value":"0.5"}. Do not put JSON punctuation inside values.'
+    )
+    local_system += "\n\nJSON output schema:\n" + json.dumps(EditPlan.model_json_schema(), separators=(",", ":"))
+    prompt = f"{local_system}\n\nUser Request & Context:\n{context}\n\nReturn valid JSON EditPlan only."
+
+    loop = asyncio.get_running_loop()
+    agentapi_bin = "/Users/luv/.gemini/antigravity/bin/agentapi"
+    if not Path(agentapi_bin).exists():
+        import shutil
+        agentapi_bin = shutil.which("agentapi") or "agentapi"
+
+    def _invoke():
+        return subprocess.run([agentapi_bin, "new-conversation", "--model=flash", prompt], capture_output=True, text=True, check=True)
+
+    try:
+        res = await loop.run_in_executor(None, _invoke)
+        data = json.loads(res.stdout)
+        convo_id = data["response"]["newConversation"]["conversationId"]
+    except Exception as exc:
+        logger.error("Failed to start Antigravity edit session: %s", exc)
+        raise AIEditError("Could not connect to local Antigravity. Ensure Antigravity is running.") from exc
+
+    logs_dir = Path.home() / f".gemini/antigravity/brain/{convo_id}/.system_generated/logs"
+    transcript_full_path = logs_dir / "transcript_full.jsonl"
+    transcript_path = logs_dir / "transcript.jsonl"
+    for _ in range(720):
+        await asyncio.sleep(0.5)
+        active_file = transcript_full_path if transcript_full_path.exists() else (transcript_path if transcript_path.exists() else None)
+        if active_file:
+            try:
+                lines = active_file.read_text().strip().split("\n")
+            except Exception:
+                continue
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("source") == "MODEL" and entry.get("status") == "DONE":
+                    if entry.get("truncated_fields") and "content" in entry["truncated_fields"] and transcript_full_path.exists():
+                        try:
+                            full_lines = transcript_full_path.read_text().strip().split("\n")
+                            for f_line in full_lines:
+                                f_entry = json.loads(f_line)
+                                if f_entry.get("step_index") == entry.get("step_index"):
+                                    entry = f_entry
+                                    break
+                        except Exception:
+                            pass
+                    content = entry.get("content", "")
+                    fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+                    if fence:
+                        content = fence.group(1).strip()
+                    try:
+                        result = EditPlan.model_validate_json(content)
+                        logger.info("Antigravity AI edit planned %d operations", len(result.operations))
+                        return result
+                    except Exception as exc:
+                        logger.error("Failed to parse Antigravity EditPlan: %s. Raw: %s", exc, content)
+                        raise AIEditError("The AI's answer was invalid. Try a smaller change.") from exc
+
+    raise AIEditError("Antigravity editing timed out. Try again.")
+
+
 async def plan_edit(context: str) -> EditPlan:
-    """Use Sonnet by default, or an explicitly configured local Ollama model."""
-    model = os.getenv("AI_EDIT_MODEL", AI_EDIT_MODEL).strip() or AI_EDIT_MODEL
+    """Use Antigravity by default, or an explicitly configured model."""
+    model = os.getenv("AI_EDIT_MODEL", "antigravity").strip() or "antigravity"
+    if model in {"antigravity", "default"} or model.startswith("antigravity:"):
+        return await _plan_edit_antigravity(context)
     if model.startswith("ollama:"):
         if not model.removeprefix("ollama:"):
             raise AIEditError("Set an Ollama model in AI_EDIT_MODEL.")
@@ -617,7 +693,7 @@ async def plan_edit(context: str) -> EditPlan:
 
     config = get_config()
     if not config.anthropic_api_key:
-        raise AIEditError("AI editing isn't set up on this server.")
+        return await _plan_edit_antigravity(context)
     client = anthropic.AsyncAnthropic(
         api_key=config.anthropic_api_key, timeout=AI_EDIT_TIMEOUT_SECONDS, max_retries=2
     )

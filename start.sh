@@ -39,19 +39,19 @@ FRONTEND_LOCAL_URL="http://localhost:${FRONTEND_PORT:-3001}"
 
 if [ -n "${LLM:-}" ]; then
     case "$LLM" in
-        google:*|google-gla:*|openai:*|openrouter:*|anthropic:*|ollama:*)
+        google:*|google-gla:*|openai:*|openrouter:*|anthropic:*|ollama:*|antigravity:*|antigravity)
             ;;
         *)
             echo -e "${YELLOW}Warning: Unsupported LLM value '$LLM'${NC}"
-            echo "Use google-gla:*, openai:*, openrouter:*, anthropic:*, or ollama:*"
+            echo "Use antigravity, google-gla:*, openai:*, openrouter:*, anthropic:*, or ollama:*"
             echo ""
             ;;
     esac
 fi
 
-if [ -z "$ASSEMBLY_AI_API_KEY" ]; then
+if [ "$TRANSCRIPTION_PROVIDER" != "whisper" ] && [ -z "$ASSEMBLY_AI_API_KEY" ]; then
     echo -e "${YELLOW}Warning: ASSEMBLY_AI_API_KEY is not set in .env${NC}"
-    echo "Video transcription will not work without this key."
+    echo "Video transcription will not work without this key (or set TRANSCRIPTION_PROVIDER=whisper)."
     echo ""
 fi
 
@@ -64,7 +64,8 @@ elif [[ "${LLM:-}" == ollama:* ]] && [ -z "${OLLAMA_BASE_URL:-}" ]; then
     echo ""
 fi
 
-if [ -z "${OPENAI_API_KEY:-}" ] && \
+if [ "$LLM" != "antigravity" ] && [[ "$LLM" != antigravity:* ]] && \
+   [ -z "${OPENAI_API_KEY:-}" ] && \
    [ -z "${GOOGLE_API_KEY:-}" ] && \
    [ -z "${ANTHROPIC_API_KEY:-}" ] && \
    [ -z "${OPENROUTER_API_KEY:-}" ]; then
