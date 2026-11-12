@@ -121,6 +121,11 @@ nohup .venv/bin/arq src.workers.ai_worker.AIWorkerSettings </dev/null > "$DIR/lo
 AI_WORKER_PID=$!
 disown $AI_WORKER_PID 2>/dev/null || true
 
+echo -e "${YELLOW}--> Starting Live Stream Monitor Worker ...${NC}"
+nohup .venv/bin/python -m src.workers.live_stream_worker </dev/null > "$DIR/logs/live-worker.log" 2>&1 &
+LIVE_WORKER_PID=$!
+disown $LIVE_WORKER_PID 2>/dev/null || true
+
 echo -e "${YELLOW}--> Starting Frontend on http://localhost:3107 ...${NC}"
 cd "$DIR/frontend"
 if [ "$DEV_MODE" -eq 1 ]; then
@@ -156,6 +161,7 @@ cd "$DIR"
 echo "$BACKEND_PID" > "$DIR/.local_pids"
 echo "$WORKER_PID" >> "$DIR/.local_pids"
 echo "$AI_WORKER_PID" >> "$DIR/.local_pids"
+echo "$LIVE_WORKER_PID" >> "$DIR/.local_pids"
 echo "$FRONTEND_PID" >> "$DIR/.local_pids"
 
 # Wait 3 seconds to verify processes started

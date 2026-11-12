@@ -28,6 +28,7 @@ pkill -f "src.workers.run_workers" 2>/dev/null || true
 pkill -f "src.workers.tasks" 2>/dev/null || true
 pkill -f "src.workers.cron_worker" 2>/dev/null || true
 pkill -f "src.workers.ai_worker" 2>/dev/null || true
+pkill -f "src.workers.live_stream_worker" 2>/dev/null || true
 lsof -ti :3107 | xargs kill -9 2>/dev/null || true
 lsof -ti :8000 | xargs kill -9 2>/dev/null || true
 

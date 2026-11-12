@@ -1,0 +1,178 @@
+"""Continuous background worker for live stream detection, buffer management, and auto-clipping."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+
+from ..database import AsyncSessionLocal
+from ..services.live_stream_service import LiveStreamService
+
+logger = logging.getLogger("live_stream_worker")
+
+
+async def run_live_stream_monitor_cycle() -> None:
+    """Run one polling and processing cycle across all active streamers."""
+    async with AsyncSessionLocal() as db:
+        # Load active streamers
+        res = await db.execute(
+            text("SELECT * FROM live_streamers WHERE is_active = true")
+        )
+        streamers = res.fetchall()
+
+        for s in streamers:
+            try:
+                now = datetime.now(timezone.utc)
+                # Probe current status
+                probe = await asyncio.to_thread(
+                    LiveStreamService.probe_live_status, s.platform, s.channel_url
+                )
+                currently_live = probe.get("is_live", False)
+                stream_title = probe.get("title") or s.current_stream_title or "Live Stream"
+                stream_url = probe.get("stream_url") or s.current_stream_url
+                stream_id = probe.get("stream_id")
+
+                if currently_live and not s.is_live:
+                    # Streamer JUST WENT LIVE!
+                    logger.info("Streamer %s (%s) is now LIVE: %s", s.name, s.platform, stream_title)
+
+                    # Create dedicated task in tasks table so clips appear on UI
+                    task_id = str(uuid.uuid4())
+                    await db.execute(
+                        text("""
+                            INSERT INTO tasks (
+                                id, user_id, status, progress, progress_message,
+                                source_metadata, workflow, processing_mode
+                            ) VALUES (
+                                :id, :user_id, 'processing', 50, 'Monitoring live stream...',
+                                :meta, 'highlights', 'fast'
+                            )
+                        """),
+                        {
+                            "id": task_id,
+                            "user_id": s.user_id,
+                            "meta": f'{{"title": "{stream_title}", "live": true, "platform": "{s.platform}", "streamer": "{s.name}"}}',
+                        },
+                    )
+
+                    # Update streamer status
+                    await db.execute(
+                        text("""
+                            UPDATE live_streamers
+                            SET is_live = true,
+                                current_stream_title = :title,
+                                current_stream_url = :url,
+                                current_stream_id = :sid,
+                                current_task_id = :task_id,
+                                last_checked_at = :now,
+                                last_live_at = :now
+                            WHERE id = :id
+                        """),
+                        {
+                            "id": s.id,
+                            "title": stream_title,
+                            "url": stream_url,
+                            "sid": stream_id,
+                            "task_id": task_id,
+                            "now": now,
+                        },
+                    )
+                    await db.commit()
+
+                    # Start rolling buffer recorder
+                    session = LiveStreamService.start_buffer_recording(
+                        streamer_id=s.id,
+                        streamer_name=s.name,
+                        platform=s.platform,
+                        stream_url=stream_url,
+                        task_id=task_id,
+                        buffer_minutes=s.buffer_minutes,
+                    )
+
+                    await LiveStreamService.record_event(
+                        db, s.id, "stream_started", title=stream_title, task_id=task_id, details=probe
+                    )
+
+                elif currently_live and s.is_live:
+                    # Streamer is STILL LIVE -> Maintain buffer & evaluate moments!
+                    await db.execute(
+                        text("UPDATE live_streamers SET last_checked_at = :now WHERE id = :id"),
+                        {"id": s.id, "now": now},
+                    )
+                    await db.commit()
+
+                    session = LiveStreamService.start_buffer_recording(
+                        streamer_id=s.id,
+                        streamer_name=s.name,
+                        platform=s.platform,
+                        stream_url=stream_url,
+                        task_id=s.current_task_id or str(uuid.uuid4()),
+                        buffer_minutes=s.buffer_minutes,
+                    )
+
+                    # Keep 10-minute rolling buffer
+                    LiveStreamService.purge_old_segments(session.buffer_dir, max_segments=s.buffer_minutes)
+
+                    # Run sliding AI moment detection
+                    clips = await LiveStreamService.evaluate_buffer_for_moments(
+                        db, session, min_virality=s.min_virality_score
+                    )
+                    if clips:
+                        logger.info("Generated %d new clips for %s live stream!", len(clips), s.name)
+
+                elif not currently_live and s.is_live:
+                    # Streamer just WENT OFFLINE
+                    logger.info("Streamer %s (%s) has ended their live stream", s.name, s.platform)
+                    LiveStreamService.stop_buffer_recording(s.id)
+
+                    await db.execute(
+                        text("""
+                            UPDATE live_streamers
+                            SET is_live = false,
+                                current_stream_url = null,
+                                last_checked_at = :now
+                            WHERE id = :id
+                        """),
+                        {"id": s.id, "now": now},
+                    )
+                    if s.current_task_id:
+                        await db.execute(
+                            text("UPDATE tasks SET status = 'completed', progress = 100, progress_message = 'Live stream ended' WHERE id = :tid"),
+                            {"tid": s.current_task_id},
+                        )
+                    await db.commit()
+
+                    await LiveStreamService.record_event(
+                        db, s.id, "stream_ended", title=s.current_stream_title, task_id=s.current_task_id
+                    )
+
+                else:
+                    # OFFLINE and was OFFLINE -> just update last_checked_at
+                    await db.execute(
+                        text("UPDATE live_streamers SET last_checked_at = :now WHERE id = :id"),
+                        {"id": s.id, "now": now},
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                logger.error("Error monitoring streamer %s: %s", getattr(s, "name", "unknown"), e)
+
+
+async def live_stream_monitor_loop(poll_interval_seconds: int = 35) -> None:
+    """Continuous daemon loop for live streamer monitoring."""
+    logger.info("Live stream monitoring daemon started (polling every %ds)...", poll_interval_seconds)
+    while True:
+        try:
+            await run_live_stream_monitor_cycle()
+        except Exception as e:
+            logger.error("Error in live stream monitor cycle: %s", e)
+        await asyncio.sleep(poll_interval_seconds)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    asyncio.run(live_stream_monitor_loop())
