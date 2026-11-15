@@ -1,8 +1,22 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { AppShell } from "@/components/app/app-shell";
-import { Radio, Plus, Trash2, RefreshCw, Video, Sparkles, ExternalLink, Activity, Tv } from "lucide-react";
+import {
+  Radio,
+  Plus,
+  Trash2,
+  RefreshCw,
+  Video,
+  Sparkles,
+  ExternalLink,
+  Activity,
+  Tv,
+  ArrowUpDown,
+  Filter,
+  Flame,
+  Users,
+} from "lucide-react";
 
 interface Streamer {
   id: string;
@@ -31,12 +45,19 @@ interface LiveClip {
   hook: string;
   duration: number;
   created_at?: string;
+  streamer_name?: string;
+  streamer_platform?: string;
 }
+
+type SortOrder = "score-desc" | "score-asc" | "newest" | "oldest";
+type ScoreThreshold = "all" | "95" | "90" | "80" | "70";
 
 export default function LiveStreamPage() {
   const [streamers, setStreamers] = useState<Streamer[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selectedStreamer, setSelectedStreamer] = useState<string | null>(null);
+  const [selectedStreamer, setSelectedStreamer] = useState<string>("all");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("score-desc");
+  const [minScoreFilter, setMinScoreFilter] = useState<ScoreThreshold>("all");
   const [clips, setClips] = useState<LiveClip[]>([]);
   const [clipsLoading, setClipsLoading] = useState(false);
 
@@ -55,43 +76,73 @@ export default function LiveStreamPage() {
       if (res.ok) {
         const data = await res.json();
         setStreamers(data);
-        if (data.length > 0 && !selectedStreamer) {
-          setSelectedStreamer(data[0].id);
-        }
       }
     } catch (e) {
       console.error("Failed to load streamers:", e);
     } finally {
       setLoading(false);
     }
-  }, [selectedStreamer]);
+  }, []);
 
-  const loadClips = useCallback(async (streamerId: string) => {
-    setClipsLoading(true);
+  const loadClips = useCallback(async (streamerId: string, showSpinner = false) => {
+    if (showSpinner) setClipsLoading(true);
     try {
       const res = await fetch(`/api/live-streamers/${streamerId}/clips`);
       if (res.ok) {
         const data = await res.json();
-        setClips(data);
+        setClips(Array.isArray(data) ? data : []);
       }
     } catch (e) {
       console.error("Failed to load clips:", e);
     } finally {
-      setClipsLoading(false);
+      if (showSpinner) setClipsLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadStreamers();
-    const interval = setInterval(loadStreamers, 15000);
+    const interval = setInterval(loadStreamers, 10000);
     return () => clearInterval(interval);
   }, [loadStreamers]);
 
   useEffect(() => {
-    if (selectedStreamer) {
-      loadClips(selectedStreamer);
-    }
+    loadClips(selectedStreamer, true);
+    const interval = setInterval(() => {
+      loadClips(selectedStreamer, false);
+    }, 6000);
+    return () => clearInterval(interval);
   }, [selectedStreamer, loadClips]);
+
+  const totalClipCount = useMemo(() => {
+    return streamers.reduce((acc, s) => acc + (s.clip_count || 0), 0);
+  }, [streamers]);
+
+  const processedClips = useMemo(() => {
+    let result = [...clips];
+
+    // Filter by score threshold
+    if (minScoreFilter !== "all") {
+      const threshold = parseInt(minScoreFilter, 10);
+      result = result.filter((c) => (c.virality_score || 0) >= threshold);
+    }
+
+    // Sort clips score-wise or date-wise
+    result.sort((a, b) => {
+      if (sortOrder === "score-desc") {
+        return (b.virality_score || 0) - (a.virality_score || 0);
+      }
+      if (sortOrder === "score-asc") {
+        return (a.virality_score || 0) - (b.virality_score || 0);
+      }
+      if (sortOrder === "oldest") {
+        return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+      }
+      // default: newest first
+      return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+    });
+
+    return result;
+  }, [clips, sortOrder, minScoreFilter]);
 
   const handleAddStreamer = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,7 +196,7 @@ export default function LiveStreamPage() {
     try {
       await fetch(`/api/live-streamers/${streamerId}`, { method: "DELETE" });
       if (selectedStreamer === streamerId) {
-        setSelectedStreamer(null);
+        setSelectedStreamer("all");
       }
       await loadStreamers();
     } catch (e) {
@@ -164,6 +215,19 @@ export default function LiveStreamPage() {
       default:
         return null;
     }
+  };
+
+  const getStreamerBadge = (streamerName?: string, platform?: string) => {
+    if (!streamerName) return null;
+    let colorClass = "bg-red-500/80 text-white";
+    if (platform === "twitch") colorClass = "bg-purple-600/90 text-white";
+    if (platform === "kick") colorClass = "bg-emerald-600/90 text-white";
+
+    return (
+      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold backdrop-blur-md shadow-sm capitalize ${colorClass}`}>
+        {streamerName}
+      </span>
+    );
   };
 
   return (
@@ -307,12 +371,27 @@ export default function LiveStreamPage() {
 
           {/* Watchlist Streamers */}
           <div className="col-span-2 space-y-4">
-            <h2 className="flex items-center justify-between text-lg font-semibold text-foreground">
-              <span>Tracked Streamers ({streamers.length})</span>
-              <span className="text-xs font-normal text-muted-foreground">
-                Auto-polls every 30 seconds
-              </span>
-            </h2>
+            <div className="flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-lg font-semibold text-foreground">
+                <span>Tracked Streamers ({streamers.length})</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Auto-polls every 30s
+                </span>
+              </h2>
+
+              {/* Quick toggle for All Streamers */}
+              <button
+                type="button"
+                onClick={() => setSelectedStreamer("all")}
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
+                  selectedStreamer === "all"
+                    ? "bg-red-500 text-white font-bold shadow-sm"
+                    : "bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+              >
+                All Streamers ({totalClipCount})
+              </button>
+            </div>
 
             {loading ? (
               <div className="flex h-48 items-center justify-center rounded-2xl border border-border bg-card">
@@ -331,7 +410,7 @@ export default function LiveStreamPage() {
                 {streamers.map((s) => (
                   <div
                     key={s.id}
-                    onClick={() => setSelectedStreamer(s.id)}
+                    onClick={() => setSelectedStreamer(selectedStreamer === s.id ? "all" : s.id)}
                     className={`cursor-pointer rounded-2xl border p-5 transition shadow-sm ${
                       selectedStreamer === s.id
                         ? "border-red-500 bg-red-500/5 ring-1 ring-red-500"
@@ -411,15 +490,94 @@ export default function LiveStreamPage() {
 
         {/* Bottom Section: Real-Time Clips Feed */}
         <div className="mt-12">
-          <div className="mb-6 flex items-center justify-between">
+          {/* Section Header with Filter Toolbar */}
+          <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <h2 className="flex items-center gap-2 text-xl font-bold text-foreground">
+              <div className="flex items-center gap-2.5">
                 <Sparkles className="size-5 text-amber-400" />
-                Live Generated Clips
-              </h2>
+                <h2 className="text-xl font-bold text-foreground">Live Generated Clips</h2>
+                <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-semibold text-muted-foreground">
+                  {processedClips.length} {processedClips.length === 1 ? "clip" : "clips"}
+                </span>
+                {selectedStreamer !== "all" && (
+                  <span className="rounded-full bg-red-500/10 px-2.5 py-0.5 text-xs font-medium text-red-400 border border-red-500/20 capitalize">
+                    {streamers.find((s) => s.id === selectedStreamer)?.name || "Filtered"}
+                  </span>
+                )}
+              </div>
               <p className="mt-1 text-xs text-muted-foreground">
-                Standout moments cut and subtitled in real time directly from the 10-minute live buffer.
+                Standout moments cut and subtitled in real time directly from the live stream buffers.
               </p>
+            </div>
+
+            {/* Filter and Sort Toolbar */}
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Streamer Filter Dropdown */}
+              <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs shadow-sm">
+                <Users className="size-3.5 text-muted-foreground" />
+                <span className="text-muted-foreground font-medium">Streamer:</span>
+                <select
+                  value={selectedStreamer}
+                  onChange={(e) => setSelectedStreamer(e.target.value)}
+                  className="bg-transparent font-semibold text-foreground outline-none cursor-pointer"
+                >
+                  <option value="all">All Streamers ({totalClipCount})</option>
+                  {streamers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.clip_count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Score-wise Sort Order Dropdown */}
+              <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs shadow-sm">
+                <ArrowUpDown className="size-3.5 text-muted-foreground" />
+                <span className="text-muted-foreground font-medium">Sort:</span>
+                <select
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                  className="bg-transparent font-semibold text-foreground outline-none cursor-pointer"
+                >
+                  <option value="score-desc">🔥 Higher Score on Top (100 → 0)</option>
+                  <option value="score-asc">📉 Lower Score on Top (0 → 100)</option>
+                  <option value="newest">🕒 Newest First</option>
+                  <option value="oldest">⏳ Oldest First</option>
+                </select>
+              </div>
+
+              {/* Score Threshold Filter Dropdown */}
+              <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs shadow-sm">
+                <Filter className="size-3.5 text-muted-foreground" />
+                <span className="text-muted-foreground font-medium">Min Score:</span>
+                <select
+                  value={minScoreFilter}
+                  onChange={(e) => setMinScoreFilter(e.target.value as ScoreThreshold)}
+                  className="bg-transparent font-semibold text-foreground outline-none cursor-pointer"
+                >
+                  <option value="all">All Scores</option>
+                  <option value="95">⚡ 95+ (Instant Viral)</option>
+                  <option value="90">🎯 90+ (Ultra High)</option>
+                  <option value="80">✨ 80+ (High Score)</option>
+                  <option value="70">📊 70+ (Standard)</option>
+                </select>
+              </div>
+
+              {/* Reset Filters button */}
+              {(sortOrder !== "score-desc" || minScoreFilter !== "all" || selectedStreamer !== "all") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSortOrder("score-desc");
+                    setMinScoreFilter("all");
+                    setSelectedStreamer("all");
+                  }}
+                  className="rounded-xl border border-border bg-card px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition shadow-sm"
+                  title="Reset all filters"
+                >
+                  Reset
+                </button>
+              )}
             </div>
           </div>
 
@@ -427,20 +585,32 @@ export default function LiveStreamPage() {
             <div className="flex h-48 items-center justify-center rounded-2xl border border-border bg-card">
               <RefreshCw className="size-6 animate-spin text-muted-foreground" />
             </div>
-          ) : clips.length === 0 ? (
+          ) : processedClips.length === 0 ? (
             <div className="flex h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-card p-6 text-center">
               <Activity className="size-8 text-muted-foreground/40 mb-2" />
-              <p className="text-sm font-medium text-foreground">No clips generated yet</p>
+              <p className="text-sm font-medium text-foreground">No clips match your filter</p>
               <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-                When a monitored streamer is live, AI continuously reviews the 10-minute rolling buffer and automatically generates viral vertical clips here.
+                Try lowering the minimum score filter or selecting another streamer to see generated clips.
               </p>
+              {(minScoreFilter !== "all" || selectedStreamer !== "all") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMinScoreFilter("all");
+                    setSelectedStreamer("all");
+                  }}
+                  className="mt-3 rounded-lg bg-muted px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent transition"
+                >
+                  Clear Filters
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-              {clips.map((clip) => (
+              {processedClips.map((clip) => (
                 <div
                   key={clip.id}
-                  className="group relative overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition hover:shadow-md"
+                  className="group relative overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition hover:shadow-md hover:border-border/80"
                 >
                   <div className="relative aspect-[9/16] bg-black">
                     <video
@@ -449,8 +619,30 @@ export default function LiveStreamPage() {
                       preload="metadata"
                       className="size-full object-cover"
                     />
-                    <div className="absolute top-2.5 right-2.5 rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-bold text-black shadow">
-                      Score: {clip.virality_score}
+
+                    {/* Streamer Badge (Top Left) */}
+                    {clip.streamer_name && (
+                      <div className="absolute top-2.5 left-2.5">
+                        {getStreamerBadge(clip.streamer_name, clip.streamer_platform)}
+                      </div>
+                    )}
+
+                    {/* Virality Score Badge (Top Right) */}
+                    <div className="absolute top-2.5 right-2.5">
+                      {clip.virality_score >= 95 ? (
+                        <div className="flex items-center gap-1 rounded-full bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 px-2.5 py-0.5 text-xs font-black text-black shadow-lg animate-pulse ring-1 ring-amber-300">
+                          <Flame className="size-3 fill-black" />
+                          <span>{clip.virality_score} VIRAL</span>
+                        </div>
+                      ) : clip.virality_score >= 85 ? (
+                        <div className="flex items-center gap-1 rounded-full bg-amber-500/90 px-2 py-0.5 text-xs font-bold text-black shadow">
+                          <span>Score: {clip.virality_score}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1 rounded-full bg-background/90 backdrop-blur-md border border-border px-2 py-0.5 text-xs font-semibold text-foreground shadow">
+                          <span>Score: {clip.virality_score}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 

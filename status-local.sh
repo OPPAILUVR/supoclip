@@ -49,6 +49,7 @@ fi
 WORKER_COUNT=$(pgrep -f "src.workers.tasks.WorkerSettings" | wc -l | tr -d ' ')
 AI_WORKER_COUNT=$(pgrep -f "src.workers.ai_worker.AIWorkerSettings" | wc -l | tr -d ' ')
 CRON_WORKER_COUNT=$(pgrep -f "src.workers.cron_worker.CronWorkerSettings" | wc -l | tr -d ' ')
+LIVE_WORKER_COUNT=$(pgrep -f "src.workers.live_stream_worker" | wc -l | tr -d ' ')
 
 if [ "$WORKER_COUNT" -gt 0 ]; then
     echo -e "Video Worker      : ${GREEN}RUNNING ($WORKER_COUNT process)${NC}"
@@ -66,6 +67,12 @@ if [ "$CRON_WORKER_COUNT" -gt 0 ]; then
     echo -e "Cron Worker       : ${GREEN}RUNNING ($CRON_WORKER_COUNT process)${NC}"
 else
     echo -e "Cron Worker       : ${RED}STOPPED${NC}"
+fi
+
+if [ "$LIVE_WORKER_COUNT" -gt 0 ]; then
+    echo -e "Live Stream Worker: ${GREEN}RUNNING ($LIVE_WORKER_COUNT process)${NC}"
+else
+    echo -e "Live Stream Worker: ${RED}STOPPED${NC}"
 fi
 
 echo -e "${BLUE}==============================================${NC}"

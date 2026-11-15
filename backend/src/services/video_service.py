@@ -1068,6 +1068,20 @@ class VideoService:
             if render_report.get("caption_y") is not None:
                 from ..clip_source_map import save_clip_caption_settings
                 save_clip_caption_settings(clip_path, {"position_y": render_report["caption_y"], "position_is_center": True})
+            
+            # Strip old encoder/device metadata and embed SEO tags directly into MP4 container
+            try:
+                from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
+                hook_t = segment.get("hook_title") or f"Viral Highlight #{clip_index + 1}"
+                strip_and_embed_video_metadata(
+                    video_path=clip_path,
+                    title=hook_t,
+                    streamer_name="Creator",
+                    custom_tags=get_streamer_tags("Creator")
+                )
+            except Exception as meta_e:
+                logger.warning(f"Metadata embedding skipped for {clip_path.name}: {meta_e}")
+
             # Store what plays, after crossfades and the resolution cap.
             cleaned_duration = await run_in_thread(
                 rendered_clip_duration, clip_path, keep_ranges, output_offsets

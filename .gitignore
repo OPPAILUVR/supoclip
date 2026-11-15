@@ -25,3 +25,20 @@ docs/youtube-provider-registry*.json
 
 # Local agent checkouts
 .claude/worktrees/
+
+# SupoClip Local Media & Buffers
+backend/clips/
+backend/uploads/
+backend/scratch/
+backend/backend/
+backups/
+*.log
+backend/*.log
+*.db
+backend/*.db
+.local_pids
+.frontend_pid
+
+# Sensitive Browser & Auth Data
+backend/browser_data/
+browser_data/

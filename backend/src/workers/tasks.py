@@ -2,6 +2,7 @@
 Worker tasks - background jobs processed by arq workers.
 """
 
+import os
 import logging
 from typing import Dict, Any, Optional
 import json

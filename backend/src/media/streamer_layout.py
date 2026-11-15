@@ -1,0 +1,303 @@
+"""Streamer Facecam + Gameplay / Content Separation Pipeline for Live Auto-Clipping.
+
+Analyzes live stream broadcasts to detect stream layouts and separate the streamer's
+camera from game/content into optimal 9:16 vertical short formats:
+
+1. Side-by-Side Streams (e.g. Chess streams, screen-share + camera, co-streams):
+   - Detects the vertical partition dividing content (e.g. chess board) from streamer.
+   - Top Tile (~1040px): Full content (chess board / shared screen), complete & uncropped.
+   - Bottom Tile (~880px): Streamer camera zoomed out to show upper body, desk, room, mic.
+   - Subtitles placed cleanly in the middle divider (matching professional clippers).
+
+2. Corner Facecam Streams (e.g. GTA, gaming streams):
+   - Detects stationary corner webcam overlay.
+   - Top Tile (760px): Streamer webcam zoomed out comfortably (full camera frame).
+   - Bottom Tile (1160px): Game action shifted to avoid webcam overlap.
+   - Subtitles placed at the bottom.
+
+3. Fullscreen / Just Chatting / Single Camera:
+   - Returns None so the caller renders a single 9:16 frame, preventing the video
+     from duplicating across upper and lower frames.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from .face_detection import open_yunet_detector
+from .ffmpeg import clamp_even, round_to_even
+
+logger = logging.getLogger(__name__)
+
+OUT_W = 1080
+OUT_H = 1920
+
+
+def detect_streamer_layout(
+    video_path: Path,
+    width: int,
+    height: int,
+    max_samples: int = 16,
+) -> Optional[Dict[str, Any]]:
+    """Detect streamer layout and build the optimal [Content / Streamer] 9:16 layout.
+
+    Returns dict with {'video_filter': str, 'mode': 'complex', 'caption_y': float}
+    or None if the video is single-camera/fullscreen (no separation needed).
+    """
+    if width < 320 or height < 240:
+        return None
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    duration = total_frames / fps if fps > 0 else 0.0
+
+    if duration < 1.0:
+        cap.release()
+        return None
+
+    detector = open_yunet_detector()
+    if not detector:
+        cap.release()
+        return None
+
+    sample_count = min(max_samples, max(6, int(duration * 2)))
+    sample_times = np.linspace(0.4, max(0.4, duration - 0.4), sample_count)
+    face_detections: List[Dict[str, Any]] = []
+    frames_for_grad: List[np.ndarray] = []
+
+    try:
+        for t in sample_times:
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if len(frames_for_grad) < 4:
+                frames_for_grad.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+            boxes = detector.detect(frame)
+            for b in boxes:
+                # b: (x, y, w, h, score)
+                if b[4] >= 0.65:
+                    face_detections.append({"t": t, "box": b})
+    finally:
+        cap.release()
+
+    if not face_detections:
+        return None
+
+    # Cluster detections by spatial proximity (distance < 120px)
+    clusters: List[Dict[str, Any]] = []
+    for d in face_detections:
+        bx, by, bw, bh, score = d["box"]
+        cx, cy = bx + bw / 2, by + bh / 2
+        matched = False
+        for c in clusters:
+            if abs(cx - c["cx"]) < 120 and abs(cy - c["cy"]) < 120:
+                c["boxes"].append(d["box"])
+                c["cx"] = float(np.mean([b[0] + b[2] / 2 for b in c["boxes"]]))
+                c["cy"] = float(np.mean([b[1] + b[3] / 2 for b in c["boxes"]]))
+                matched = True
+                break
+        if not matched:
+            clusters.append({"cx": cx, "cy": cy, "boxes": [d["box"]]})
+
+    min_count = max(2, int(len(sample_times) * 0.20))
+    stable_clusters = []
+    for c in clusters:
+        n = len(c["boxes"])
+        if n < min_count:
+            continue
+        cx, cy = c["cx"], c["cy"]
+        med_w = float(np.median([b[2] for b in c["boxes"]]))
+        med_h = float(np.median([b[3] for b in c["boxes"]]))
+        std_x = float(np.std([b[0] + b[2] / 2 for b in c["boxes"]]))
+        std_y = float(np.std([b[1] + b[3] / 2 for b in c["boxes"]]))
+        if std_x < 65 and std_y < 65:
+            stable_clusters.append({
+                "cx": cx, "cy": cy, "w": med_w, "h": med_h,
+                "count": n, "std_x": std_x, "std_y": std_y,
+                "h_frac": med_h / height, "w_frac": med_w / width,
+                "cx_frac": cx / width, "cy_frac": cy / height,
+            })
+
+    if not stable_clusters:
+        return None
+
+    # Pick the most prominent/stationary cluster
+    stable_clusters.sort(key=lambda x: (x["count"], -x["std_x"]), reverse=True)
+    primary = stable_clusters[0]
+
+    # -------------------------------------------------------------------------
+    # Check for Vertical Divider Line (Side-by-Side / Split Stream)
+    # -------------------------------------------------------------------------
+    divider_x = None
+    if frames_for_grad:
+        # Search for vertical boundary in [0.32 * W, 0.68 * W]
+        grads = []
+        for g_frame in frames_for_grad:
+            sobelx = cv2.Sobel(g_frame, cv2.CV_64F, 1, 0, ksize=3)
+            grads.append(np.mean(np.abs(sobelx), axis=0))
+        mean_grad = np.mean(grads, axis=0)
+        s_start, s_end = int(width * 0.32), int(width * 0.68)
+        search_region = mean_grad[s_start:s_end]
+        peak_idx = int(np.argmax(search_region))
+        peak_val = search_region[peak_idx]
+        median_val = np.median(search_region)
+        # Strong vertical edge peak
+        if peak_val > max(12.0, median_val * 2.2):
+            candidate_div = s_start + peak_idx
+            # Verify the face sits cleanly on one side of this divider
+            if (candidate_div < primary["cx"] and primary["cx_frac"] > 0.52) or \
+               (candidate_div > primary["cx"] and primary["cx_frac"] < 0.48):
+                divider_x = candidate_div
+                logger.info("Found strong vertical stream divider at x=%d (ratio=%.3f)", divider_x, divider_x / width)
+
+    # =========================================================================
+    # CASE 1: Side-by-Side Split Stream (e.g. Chess streams, screen + camera)
+    # =========================================================================
+    # In side-by-side streams, the streamer occupies an entire half of the screen,
+    # so their face is prominently large (h_frac >= 0.20) and sits on one side.
+    side_candidates = [
+        c for c in stable_clusters
+        if c["h_frac"] >= 0.20 and (c["cx_frac"] > 0.52 or c["cx_frac"] < 0.48)
+    ]
+
+    if side_candidates and divider_x is not None:
+        target = side_candidates[0]
+        div_x = divider_x
+        face_on_right = target["cx"] > div_x
+
+        if face_on_right:
+            # Content is on left [0:div_x], Streamer is on right [div_x:width]
+            content_x, content_w = 0, round_to_even(div_x)
+            cam_x, cam_w = round_to_even(div_x), round_to_even(width - div_x)
+        else:
+            # Streamer is on left [0:div_x], Content is on right [div_x:width]
+            cam_x, cam_w = 0, round_to_even(div_x)
+            content_x, content_w = round_to_even(div_x), round_to_even(width - div_x)
+
+        # Top Tile: Content (1080 x 1040)
+        # Bottom Tile: Streamer Camera (1080 x 880) - Zoomed out to show upper body & room
+        top_h = 1040
+        bottom_h = OUT_H - top_h  # 880
+
+        # Scale content to fit 1080 width, centered vertically
+        content_filter = (
+            f"crop={content_w}:{height}:{content_x}:0,"
+            f"scale={OUT_W}:{top_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            f"pad={OUT_W}:{top_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+        )
+
+        # Scale camera: zoomed out to capture whole room, desk, mic
+        cam_filter = (
+            f"crop={cam_w}:{height}:{cam_x}:0,"
+            f"scale={OUT_W}:{bottom_h}:flags=lanczos,setsar=1"
+        )
+
+        video_filter = (
+            f"[0:v]split=2[csrc][msrc];"
+            f"[csrc]{content_filter}[top];"
+            f"[msrc]{cam_filter}[bottom];"
+            f"[top][bottom]vstack=inputs=2[vout]"
+        )
+
+        caption_y = round(top_h / OUT_H, 3)  # Subtitles sit in the middle divider (~0.54)
+        logger.info(
+            "Configured Side-by-Side layout: Content (%d,%d), Camera (%d,%d), CaptionY=%.2f",
+            content_w, height, cam_w, height, caption_y
+        )
+        return {
+            "video_filter": video_filter,
+            "mode": "complex",
+            "caption_y": caption_y,
+            "layout_type": "side_by_side",
+        }
+
+    # =========================================================================
+    # CASE 2: Corner Facecam Overlay on Fullscreen Game (e.g. GTA, gaming)
+    # =========================================================================
+    # The streamer is in a small corner box (h_frac < 0.18, corner_dist < 0.52)
+    diag = float(np.hypot(width / 2, height / 2))
+    corner_candidates = []
+    for c in stable_clusters:
+        dist_tr = np.hypot(width - c["cx"], c["cy"])
+        dist_tl = np.hypot(c["cx"], c["cy"])
+        dist_br = np.hypot(width - c["cx"], height - c["cy"])
+        dist_bl = np.hypot(c["cx"], height - c["cy"])
+        cdist = float(min(dist_tr, dist_tl, dist_br, dist_bl) / diag)
+        if cdist < 0.52 and c["h_frac"] < 0.18:
+            corner_candidates.append({**c, "corner_dist": cdist})
+
+    if corner_candidates:
+        # Pick the most corner-anchored candidate
+        corner_candidates.sort(key=lambda x: (x["corner_dist"], -x["count"]))
+        webcam = corner_candidates[0]
+
+        top_h = 760
+        bottom_h = OUT_H - top_h  # 1160
+
+        # Zoomed-out webcam crop: capture comfortable 16:9 webcam framing
+        crop_cam_w = round_to_even(int(min(width, max(webcam["w"] * 5.2, width * 0.32))))
+        crop_cam_h = round_to_even(int(crop_cam_w * top_h / OUT_W))
+
+        if webcam["cx"] > width * 0.6:
+            cam_x = max(0, width - crop_cam_w)
+        elif webcam["cx"] < width * 0.4:
+            cam_x = 0
+        else:
+            cam_x = clamp_even(int(webcam["cx"] - crop_cam_w / 2), 0, width - crop_cam_w)
+
+        if webcam["cy"] < height * 0.4:
+            cam_y = 0
+        elif webcam["cy"] > height * 0.6:
+            cam_y = max(0, height - crop_cam_h)
+        else:
+            cam_y = clamp_even(int(webcam["cy"] - crop_cam_h * 0.40), 0, height - crop_cam_h)
+
+        # Bottom tile: Game content, shifted away from the webcam corner so webcam is not duplicated
+        game_h = round_to_even(height)
+        game_w = round_to_even(int(game_h * OUT_W / bottom_h))  # ~1004px
+
+        if webcam["cx"] > width * 0.5:
+            # Webcam is on right -> center gameplay on left-center
+            game_x = clamp_even(int(width * 0.20), 0, width - game_w)
+        else:
+            # Webcam is on left -> center gameplay on right-center
+            game_x = clamp_even(int(width * 0.80 - game_w), 0, width - game_w)
+
+        video_filter = (
+            f"[0:v]split=2[cam_src][game_src];"
+            f"[cam_src]crop={crop_cam_w}:{crop_cam_h}:{cam_x}:{cam_y},"
+            f"scale={OUT_W}:{top_h}:flags=lanczos,setsar=1[top];"
+            f"[game_src]crop={game_w}:{game_h}:{game_x}:0,"
+            f"scale={OUT_W}:{bottom_h}:flags=lanczos,setsar=1[bottom];"
+            f"[top][bottom]vstack=inputs=2[vout]"
+        )
+
+        caption_y = 0.82
+        logger.info(
+            "Configured Corner Facecam layout: Webcam (%d,%d), Game (%d,%d), CaptionY=%.2f",
+            crop_cam_w, crop_cam_h, game_w, game_h, caption_y
+        )
+        return {
+            "video_filter": video_filter,
+            "mode": "complex",
+            "caption_y": caption_y,
+            "layout_type": "corner_facecam",
+        }
+
+    # =========================================================================
+    # CASE 3: Single Camera / Fullscreen / Just Chatting
+    # =========================================================================
+    # Return None so the caller uses a single full 9:16 frame (never duplicating the video)
+    logger.info("Single camera / full-screen broadcast detected (no split separation needed).")
+    return None

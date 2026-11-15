@@ -318,13 +318,24 @@ CONTENT NEUTRALITY RULES:
 5. Only downgrade a segment when the transcript itself is weak, confusing, repetitive, unusable, or a poor standalone clip
 
 SEGMENT SELECTION CRITERIA:
-1. STRONG HOOKS: Attention-grabbing opening lines
-2. VALUABLE CONTENT: Tips, insights, interesting facts, stories
-3. EMOTIONAL MOMENTS: Excitement, surprise, humor, inspiration
-4. COMPLETE THOUGHTS: Self-contained ideas that make sense alone
-5. ENTERTAINING: Content people would want to share
-6. HIGH SIGNAL: Prefer specific, concrete language over vague discussion
-7. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping unless they are unusually compelling
+1. STRONG HOOKS (0-3s): Attention-grabbing opening lines, sudden shock, or provocative question
+2. EMPIRICAL PACING & WPM:
+   - Prefer 85-95 WPM conversational/dramatic pacing punctuated by natural pauses, reactions, laughs, gasps, or shock
+   - Avoid dense monotone monologues (>125 WPM) that lack dramatic breathing room
+3. MULTIMODAL ACTION & REACTION MOMENTS:
+   - Prioritize high-arousal visual/audio actions: sudden laughter, screams, desk slams, chair jumps, and abrupt posture slumps
+   - For reaction streamers (e.g. watching videos/TikToks), capture the full setup-to-punchline reaction terminating right on the laugh or punchline
+4. STREAMER VIRAL ARCHETYPES:
+   - Relationship drama, sibling banter, awkward confessions, and studio accidents beat technical gameplay
+   - Cynical punchlines and video reactions terminating cleanly on the laugh beat passive listening
+   - High kinetic chaos, physical challenges, and explosive vocal reactions beat quiet menu navigation
+5. DURATION & STORY ARC (35-55s TARGET, MIN 25s, MAX 58s):
+   - Strongly bias toward 35 to 55 seconds (encompassing catalyst setup + peak reaction + punchline resolution)
+   - Minimum duration: 25 seconds (never generate fragmented 15-20s clips without the provoking context)
+   - Hard maximum: 58 seconds (never exceed 58s so the clip remains 100% eligible for YouTube Shorts)
+6. COMPLETE THOUGHTS: Self-contained ideas that make sense alone without missing context
+7. ENTERTAINING & SHAREABLE: Content viewers immediately DM to friends
+8. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping
 
 WHAT A GOOD CLIP FEELS LIKE:
 - A viewer should understand and care without the original title, thumbnail, or previous context
@@ -361,20 +372,33 @@ For each segment, provide a detailed virality breakdown:
    - 0-9: Generic content
 
 HOOK TITLES ("hook_title" per segment):
-- Write a short on-screen headline (3-9 words) that is burned into the top of the clip
-- It must make a scrolling viewer stop: a bold claim, curiosity gap, number, or stakes taken directly from the segment
-- Stay grounded: only promise what the clip actually delivers; never invent facts or numbers
-- Do not simply repeat the first spoken words verbatim; reframe them as a headline
-- Plain text only: no hashtags, no emojis, no quotes around the title
+- Write an irresistible, high-CTR on-screen headline (3-8 words) burned into the top of the clip
+- It MUST force a scrolling viewer to stop and click using the CURIOSITY GAP (open loop theory)
+- Pose high emotional stakes, impending disaster, disbelief, instant karma, or an unresolved question
+- NEVER spoil the punchline, ending, or outcome in the title (the title creates the tension; the video delivers the payoff)
+- Stay grounded: accurately reflect the segment's drama or value without inventing false facts or fake numbers
+- Plain text only: NO hashtags, NO emojis, NO quotes around the title
 - Write it in the same language as the transcript
-- Good examples: "The $40k mistake I keep seeing", "Why nobody tells you this about VC", "Do this before your next interview"
+- Every hook_title MUST be 100% unique and specifically grounded in the spoken words, named entities, and visual action of this exact segment.
+- NEVER use generic, repetitive catchphrases or static template clichés.
+- High-CTR dynamic formulas (replace bracketed terms with actual details from the segment):
+  * [Speaker/Entity] Realized The [Topic] Mistake Too Late
+  * When [Speaker] Discovered What [Entity/Chat] Actually Did
+  * The Shocking Truth Behind [Topic/Action]
+  * [Speaker] Stood Speechless After This [Event]
+  * Why [Speaker] Refused To Back Down On [Topic]
+  * The Exact Decision That Changed [Topic] Forever
+- Titles must be 3 to 7 words, punchy, visceral, and readable at a glance. NO quotes, NO hashtags, NO emojis.
 
 CLIP BOUNDARIES — OPENING AND ENDING:
 - start_time is the first word of a sentence a new viewer can understand with no prior context
 - Do not start mid-sentence, on a filler (like, dude, um, well), on a bare agreement (yes, yeah, right, exactly, totally), or on a pronoun that points at someone the viewer has not met yet (he, she, they)
 - Do not start on a back-reference ("as I said", "the thing we mentioned", "that point", "before we started recording") unless the clip also contains the thing being referenced
 - If the moment only makes sense with the previous sentence's noun, claim, or question, move start_time back to include that sentence
-- end_time is the last word of the sentence that lands the point. Do not stop mid-clause, and do not keep the opening words of the next unrelated thought
+- end_time is the last word of the sentence that lands the point or delivers the full explanation/reasoning.
+- CRITICAL ZERO-DEFECT BOUNDARY RULE: NEVER cut on dangling connectives ("and", "but", "because", "why", "so", "like", "if", "when") or introductory clauses ("And let me...", "Let me tell you...", "The reason is...", "Here's why...").
+- If the speaker begins explaining why they did or said something, include the entire explanation sentence until the thought is 100% complete and lands on terminal punctuation (. ! ?).
+- Do not keep the opening words of the next unrelated thought, and never end mid-sentence.
 - The clip's real first sentence is the hook. Do not choose a weak opening because a later line could be replayed in front of it
 - Judge the first spoken seconds on their own, separately from hook_title: a viewer who hears only them must know the subject or claim
 - Skip lead-in banter before the point (calling someone over, "No. No? Ah!", greetings, reactions to something off-screen) and start on the sentence that delivers it
@@ -476,15 +500,17 @@ class AntigravityDirectModel(Model):
     def system(self) -> str:
         return "antigravity"
 
-    async def request(self, messages, model_settings, model_request_parameters):
-        prompt_parts = []
-        for m in messages:
-            for p in getattr(m, "parts", []):
-                content = getattr(p, "content", None)
-                if content is not None:
-                    prompt_parts.append(str(content))
-
-        combined_prompt = "\n\n".join(prompt_parts)
+    async def request(self, messages, model_settings=None, model_request_parameters=None):
+        if isinstance(messages, str):
+            combined_prompt = messages
+        else:
+            prompt_parts = []
+            for m in messages:
+                for p in getattr(m, "parts", []):
+                    content = getattr(p, "content", None)
+                    if content is not None:
+                        prompt_parts.append(str(content))
+            combined_prompt = "\n\n".join(prompt_parts)
         if "JSON" not in combined_prompt and "json" not in combined_prompt:
             combined_prompt += "\n\nRespond with valid JSON only."
 
@@ -495,8 +521,24 @@ class AntigravityDirectModel(Model):
             agentapi_bin = shutil.which("agentapi") or "agentapi"
 
         def _invoke():
+            env = dict(os.environ)
+            hub_dir = Path("/Users/luv/.gemini/antigravity/daemon")
+            if hub_dir.exists():
+                hub_files = sorted(hub_dir.glob("hub_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for hf in hub_files:
+                    try:
+                        info = json.loads(hf.read_text())
+                        port = info.get("httpPort")
+                        csrf = info.get("csrfToken")
+                        if port:
+                            env["ANTIGRAVITY_LS_ADDRESS"] = f"localhost:{port}"
+                            if csrf:
+                                env["ANTIGRAVITY_CSRF_TOKEN"] = csrf
+                            break
+                    except Exception:
+                        pass
             cmd = [agentapi_bin, "new-conversation", "--model=flash", combined_prompt]
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if res.returncode != 0:
                 logger.error("agentapi failed (code %d):\nSTDOUT: %s\nSTDERR: %s", res.returncode, res.stdout, res.stderr)
                 raise RuntimeError(f"agentapi failed ({res.returncode}): {res.stderr or res.stdout}")
@@ -735,10 +777,11 @@ You receive candidate clips that were picked from different parts of the same vi
 
 Judge each candidate only on its own transcript text:
 1. Hook: do the first one or two sentences make a scrolling viewer stop? Judge them apart from hook_title; lead-in banter, a lone one-word answer, or an opening conjunction ("But the main reason...") that leans on unseen context is a weak hook.
-2. Standalone: would a viewer understand and care without the rest of the video?
-3. Payoff: does it land a clear point, punchline, lesson, or story beat before it ends?
-4. Specificity and energy: concrete details, numbers, strong opinions, emotion, or humor beat vague talk.
-5. Shareability: would someone send this to a friend or save it?
+2. Duration & Pacing Sweet Spot: candidates in the 35-55 second window (min 25s, max 58s) with complete context setup, climax, and dramatic breathing room (85-95 WPM) perform significantly better than incomplete 15s snippets or clips exceeding 58s.
+3. Standalone: would a viewer understand and care without the rest of the video?
+4. Payoff: does it land a clear point, punchline, lesson, or story beat before it ends?
+5. Specificity, emotion and energy: concrete details, numbers, strong opinions, explosive reactions, emotion, or humor beat vague talk.
+6. Shareability: would someone send this to a friend or save it?
 
 Rules:
 - Stay content-neutral: never downgrade a candidate just because its topic is sensitive, controversial, or adult.
@@ -1008,23 +1051,115 @@ JSON-only output requirements:
 {transcript}"""
 
 
-def sanitize_hook_title(raw: Optional[str]) -> Optional[str]:
+GENERIC_OR_REPETITIVE_TITLES = {
+    "watchhisfacewhenherealizes",
+    "watchherfacewhensherealizes",
+    "watchtheirfacewhentheyrealize",
+    "thereisnowayhesaidthat",
+    "thereisnowayshesaidthat",
+    "thereisnowaytheysaidthat",
+    "theexactsecondeverythingfellapart",
+    "theexactmomentitfellapart",
+    "livestreamhighlight",
+    "highlightfromstreamer",
+    "instantregretin4k",
+    "waitforit",
+    "hethoughthewassafeuntil",
+    "shethoughtshewassafeuntil",
+    "caughtin4kdoingtheworstthingpossible",
+    "brostartedcelebrating2secondstooearly",
+    "wentfrom200iqto0iqin3seconds",
+    "themostunhingeddmintwitchhistory",
+    "themostunhingedconfessionintwitchhistory",
+    "broforgotthemicwasstillon",
+    "herealizedhismistaketoolate",
+    "sherealizedhermistaketoolate",
+    "brocelebratedtwosecondstooearly",
+    "hecompletelylosthismindlive",
+    "hesaidthequietpartoutloud",
+    "shesaidthequietpartoutloud",
+    "frompurehypetocompletesilence",
+    "thereisnowayheplayedthat",
+    "thereisnowaysheplayedthat",
+}
+
+
+def _generate_catchy_hook_title(
+    transcript: str,
+    reasoning: str,
+    seen_titles: Optional[set[str]] = None,
+) -> str:
+    """Produces a high-CTR, curiosity-driven title when AI provides generic or duplicate titles."""
+    stop_words = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "about",
+        "against", "between", "into", "through", "during", "before", "after", "above", "below",
+        "from", "up", "down", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+        "had", "do", "does", "did", "can", "could", "shall", "should", "will", "would", "may",
+        "might", "must", "it", "its", "you", "your", "he", "she", "they", "we", "i", "me", "my",
+        "this", "that", "what", "which", "who", "whom", "here", "there", "when", "where", "why",
+        "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such",
+        "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "just", "like",
+        "oh", "bro", "dude", "okay", "yeah", "gonna", "wanna", "gosh", "omg", "uh", "um", "said",
+        "think", "know", "going", "really", "cant", "dont", "told"
+    }
+    raw_source = f"{transcript} {reasoning}"
+    tokens = [re.sub(r'[^a-zA-Z]', '', w) for w in raw_source.split()]
+    meaningful = [w.capitalize() for w in tokens if len(w) > 3 and w.lower() not in stop_words]
+
+    templates = [
+        "The Truth About What Actually Happened",
+        "When Chat Realized He Was Right",
+        "The One Statement That Ended Everything",
+        "Why He Instantly Regretted Answering",
+        "The Wildest Unfiltered Statement Live",
+        "When Banter Turned Completely Serious",
+        "The Decision That Changed Everything",
+        "He Refused To Apologize For This",
+        "Nobody Expected This To Happen Live",
+        "The Mistake That Cost Everything",
+    ]
+
+    if meaningful:
+        topic = meaningful[0]
+        templates.insert(0, f"The Truth About The {topic} Blunder")
+        templates.insert(1, f"When Confronted About {topic} Live")
+        templates.insert(2, f"The Wildest Reaction To {topic}")
+        if len(meaningful) >= 2:
+            templates.insert(0, f"Shocked By {meaningful[0]} {meaningful[1]}")
+
+    for cand in templates:
+        norm = re.sub(r'[^a-zA-Z0-9]', '', cand.lower())
+        if norm not in GENERIC_OR_REPETITIVE_TITLES and (not seen_titles or norm not in seen_titles):
+            return cand
+
+    return f"Unfiltered Moment #{int(time.time() * 1000) % 1000}"
+
+
+def sanitize_hook_title(
+    raw: Optional[str],
+    segment: Optional[Any] = None,
+    seen_titles: Optional[set[str]] = None,
+) -> Optional[str]:
     """Normalize an AI-provided hook title for on-screen rendering.
 
     Strips wrapping quotes/markdown, collapses whitespace, drops hashtags, and
-    trims to a word-boundary length cap. Returns None when nothing usable is
-    left so callers can simply skip the overlay.
+    trims to a word-boundary length cap. Enforces catchiness, non-repetition, and
+    replaces generic templates with grounded psychological hooks.
     """
-    if not raw:
-        return None
-    title = str(raw).strip()
+    title = str(raw).strip() if raw else ""
     title = title.strip("\"'`“”‘’").strip()
     title = re.sub(r"#\w+", "", title)
     title = re.sub(r"\s+", " ", title).strip()
-    # Drop trailing sentence punctuation but keep ?/! (they carry the hook).
     title = title.rstrip(".,;:-–— ").strip()
-    if not title:
-        return None
+
+    norm = re.sub(r'[^a-zA-Z0-9]', '', title.lower().replace('#shorts', ''))
+    is_generic = (not norm) or (norm in GENERIC_OR_REPETITIVE_TITLES) or (len(title.split()) < 3) or (seen_titles and norm in seen_titles)
+
+    if is_generic:
+        transcript_text = getattr(segment, "text", "") if segment else ""
+        reasoning_text = getattr(segment, "reasoning", "") if segment else ""
+        title = _generate_catchy_hook_title(transcript_text, reasoning_text, seen_titles)
+        norm = re.sub(r'[^a-zA-Z0-9]', '', title.lower().replace('#shorts', ''))
 
     words = title.split()
     if len(words) > HOOK_TITLE_MAX_WORDS:
@@ -1036,6 +1171,10 @@ def sanitize_hook_title(raw: Optional[str]) -> Optional[str]:
         title = (clipped[:cut] if cut > 20 else title[:HOOK_TITLE_MAX_CHARS]).rstrip(
             ".,;:-–— "
         )
+
+    if seen_titles is not None and title:
+        seen_titles.add(re.sub(r'[^a-zA-Z0-9]', '', title.lower()))
+
     return title or None
 
 
@@ -1648,6 +1787,7 @@ def _validate_segments(
     """Ground model segments onto real transcript lines and drop unusable ones."""
     bounds = clip_duration(clip_length)
     validated_segments: List[TranscriptSegment] = []
+    seen_titles: set[str] = set()
     for segment in segments:
         # Validate text content
         if not segment.text.strip() or len(segment.text.split()) < 3:
@@ -1742,7 +1882,11 @@ def _validate_segments(
                     )
                     segment.virality.total_score = calculated_total
 
-            segment.hook_title = sanitize_hook_title(segment.hook_title)
+            segment.hook_title = sanitize_hook_title(
+                segment.hook_title,
+                segment=segment,
+                seen_titles=seen_titles,
+            )
             # Bounds are final here (after snapping and repair): keep the teaser
             # only when it still sits inside the clip.
             _sanitize_hook_span(segment, start_seconds, end_seconds)

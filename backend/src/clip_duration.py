@@ -13,10 +13,10 @@ class ClipDuration:
 
 
 CLIP_DURATIONS = {
-    "auto": ClipDuration(15, 60, 25, 50),
+    "auto": ClipDuration(15, 60, 35, 55),
     # Ideal maxima leave room for the sentence rewind/extension before the cap.
     "short": ClipDuration(15, 30, 18, 25),
-    "medium": ClipDuration(30, 60, 35, 55),
+    "medium": ClipDuration(30, 60, 40, 55),
     "long": ClipDuration(60, 120, 75, 110),
 }
 

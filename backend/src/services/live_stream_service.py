@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -24,6 +25,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_config
 from ..database import AsyncSessionLocal
 from ..ai import AntigravityDirectModel
+from ..media.reframing import build_vertical_filter_plan, render_reframed_clip_ffmpeg
+from ..media.streamer_layout import detect_streamer_layout
+from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filter_fragment, ffmpeg_escape_filter_path
+from ..utils.motion_analyzer import analyze_visual_actions
+from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,19 @@ def _ffprobe_path() -> str:
     return "ffprobe"
 
 
+def _is_valid_mp4(file_path: Path) -> bool:
+    """Check if an MP4 file is valid and can be demuxed (has valid moov atom)."""
+    try:
+        res = subprocess.run(
+            [_ffprobe_path(), "-v", "error", str(file_path)],
+            capture_output=True,
+            timeout=5,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 @dataclass
 class ActiveLiveSession:
     streamer_id: str
@@ -62,6 +81,332 @@ class ActiveLiveSession:
 # Active background streaming sessions: streamer_id -> ActiveLiveSession
 _active_sessions: Dict[str, ActiveLiveSession] = {}
 _sessions_lock = threading.Lock()
+
+_whisper_model = None
+_whisper_lock = threading.Lock()
+_whisper_async_lock = asyncio.Lock()
+
+
+def _get_whisper_model():
+    """Thread-safe cached Whisper model instance for concurrent live transcriptions."""
+    global _whisper_model
+    if _whisper_model is None:
+        with _whisper_lock:
+            if _whisper_model is None:
+                import whisper
+                _whisper_model = whisper.load_model("base")
+    return _whisper_model
+
+
+def _format_ass_time(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int(round((seconds - int(seconds)) * 100))
+    if cs >= 100:
+        s += 1
+        cs = 0
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+_VIRAL_TRIGGERS = {
+    "MISTAKE", "REGRET", "LATE", "CAUGHT", "4K", "WORST", "UNHINGED",
+    "DISASTER", "WRONG", "EXPOSED", "PANIC", "NEVER", "THIS", "INSTANTLY",
+    "HAPPENED", "ILLEGAL", "CHEATING", "FORGOT", "0 IQ", "200 IQ", "ENDED",
+    "BANNED", "SHOCKING", "CONFESSED", "FELL", "APART", "EXPLODED", "RUINED",
+    "FAIL", "FAILED", "RAGE", "LOST", "GONE", "INSANE", "CRAZY", "BROKE"
+}
+
+
+def _format_hook_title_for_ass(hook_title: str) -> str:
+    """Format hook title for ASS with electric yellow accents on viral trigger words."""
+    if not hook_title:
+        return ""
+    clean = hook_title.replace("{", "").replace("}", "").strip()
+    words = clean.split()
+    formatted = []
+    for w in words:
+        bare = w.strip(".,!?:;\"'").upper()
+        if bare in _VIRAL_TRIGGERS:
+            # Highlight in electric yellow (\c&H0000FFFF&), then restore white (\c&H00FFFFFF&)
+            formatted.append(f"{{\\c&H0000FFFF&}}{w.upper()}{{\\c&H00FFFFFF&}}")
+        else:
+            formatted.append(w.upper())
+    return "{\\b1}" + " ".join(formatted) + "{\\b0}"
+
+
+def _build_live_clip_ass(
+    segments: list,
+    start_s: float,
+    end_s: float,
+    hook_title: str,
+    output_ass: Path,
+    caption_y: float = 0.80,
+) -> None:
+    # MarginV for Alignment 2 (bottom-center)
+    margin_v = max(80, int(1920 * (1.0 - caption_y)))
+
+    ass_lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: HookTitle,Arial,66,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,3,8,48,48,220,1",
+        f"Style: Caption,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,40,40,{margin_v},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+
+    duration = max(1.0, end_s - start_s)
+
+    # 1. Hook Title Animation (Top): pop spring + fade in, hold for 8s, then fade out
+    if hook_title:
+        title_end = min(duration, 8.0)
+        formatted_title = _format_hook_title_for_ass(hook_title)
+        title_anim = "{\\fad(140,250)\\fscx86\\fscy86\\t(0,120,\\fscx106\\fscy106)\\t(120,240,\\fscx100\\fscy100)}"
+        ass_lines.append(
+            f"Dialogue: 0,0:00:00.00,{_format_ass_time(title_end)},HookTitle,,0,0,0,,{title_anim}{formatted_title}"
+        )
+
+    # 2. Extract and align all words for spoken dialogue within the clip window
+    all_words = []
+    for seg in segments:
+        seg_start = float(seg.get("start", 0.0))
+        seg_end = float(seg.get("end", 0.0))
+        text = str(seg.get("text", "")).strip()
+        if not text or seg_end <= start_s or seg_start >= end_s:
+            continue
+
+        words_data = seg.get("words")
+        if words_data and len(words_data) > 0:
+            for w in words_data:
+                w_start = float(w.get("start", seg_start))
+                w_end = float(w.get("end", seg_end))
+                w_text = str(w.get("word", "")).strip()
+                if w_text and w_end > start_s and w_start < end_s:
+                    all_words.append({
+                        "word": w_text.replace("{", "").replace("}", ""),
+                        "start": max(0.0, w_start - start_s),
+                        "end": min(duration, w_end - start_s),
+                    })
+        else:
+            raw_tokens = text.split()
+            if not raw_tokens:
+                continue
+            tot_dur = max(0.2, seg_end - seg_start)
+            w_dur = tot_dur / len(raw_tokens)
+            for idx, token in enumerate(raw_tokens):
+                ws = seg_start + idx * w_dur
+                we = ws + w_dur
+                if we > start_s and ws < end_s:
+                    all_words.append({
+                        "word": token.replace("{", "").replace("}", ""),
+                        "start": max(0.0, ws - start_s),
+                        "end": min(duration, we - start_s),
+                    })
+
+    # Group into snappy chunks of 3-4 words (or sentence boundaries)
+    chunks = []
+    current_chunk = []
+    for w in all_words:
+        current_chunk.append(w)
+        if len(current_chunk) >= 3 or w["word"].rstrip().endswith((".", "!", "?")):
+            chunks.append(current_chunk)
+            current_chunk = []
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    # Render dynamic animated karaoke captions with spring bounce entrance
+    for chunk in chunks:
+        chunk_end = chunk[-1]["end"]
+        for i, target_word in enumerate(chunk):
+            w_start = target_word["start"]
+            w_end = chunk[i + 1]["start"] if i + 1 < len(chunk) else chunk_end
+            if w_end <= w_start:
+                w_end = w_start + 0.12
+
+            # Pop / Bounce entrance spring on the first word of the chunk
+            entrance = "{\\fscx84\\fscy84\\t(0,80,\\fscx112\\fscy112)\\t(80,180,\\fscx100\\fscy100)}" if i == 0 else ""
+
+            # Highlight current active word in electric yellow (&H0000FFFF&)
+            parts = []
+            for j, other in enumerate(chunk):
+                clean_text = other["word"].strip().upper()
+                if j == i:
+                    parts.append(f"{{\\c&H0000FFFF&}}{clean_text}{{\\c&H00FFFFFF&}}")
+                else:
+                    parts.append(clean_text)
+
+            chunk_text = " ".join(parts)
+            dialogue_text = f"{entrance}{{\\b1}}{chunk_text}{{\\b0}}" if entrance else f"{{\\b1}}{chunk_text}{{\\b0}}"
+            ass_lines.append(
+                f"Dialogue: 0,{_format_ass_time(w_start)},{_format_ass_time(w_end)},Caption,,0,0,0,,{dialogue_text}"
+            )
+
+    output_ass.write_text("\n".join(ass_lines), encoding="utf-8")
+
+
+DANGLING_CONNECTIVES = {
+    # Coordinating & subordinating conjunctions
+    "and", "but", "or", "nor", "because", "cause", "since", "as", "although", "though",
+    "while", "whereas", "if", "unless", "until",
+    # Relative pronouns & interrogative transition words
+    "that", "which", "who", "whom", "whose", "where", "when", "why", "how", "what", "whatever", "whoever",
+    # Prepositions that signal continuation
+    "like", "with", "about", "into", "onto", "than", "to", "for", "of", "by", "in", "on", "at", "from",
+    # Verbs / auxiliaries left hanging
+    "is", "are", "was", "were", "have", "has", "had", "do", "does", "did", "would", "could", "should",
+    "will", "can", "might", "must", "be", "been", "being",
+    # Articles & demonstratives
+    "the", "a", "an", "this", "these", "those",
+    # Dangling pronouns & possessives
+    "my", "your", "his", "her", "their", "our", "its",
+    # Connectives & fillers
+    "so", "then", "well", "actually", "basically", "also", "plus",
+}
+
+DANGLING_PHRASES = (
+    "and let me", "let me", "let me tell", "let me explain", "the reason why",
+    "the reason is", "the reason", "here is why", "here's why", "what happens is",
+    "what i mean", "here it comes", "look at this", "watch this", "wait until",
+    "and then", "so basically", "for example", "such as", "i mean", "you know",
+    "in fact", "i think that", "i would say", "because if you", "because if",
+    "and if you", "and if", "why i", "why he", "why they", "why would", "why wouldn't",
+    "why would not"
+)
+
+ANTICIPATION_LEAD_IN_PHRASES = (
+    "here it comes", "watch this", "look at this", "wait for it",
+    "here we go", "check this out", "wait until you see"
+)
+
+
+def is_phrase_incomplete(text: str) -> bool:
+    raw = text.strip()
+    if not raw:
+        return True
+    lower = raw.lower()
+    if raw[-1] in (",", ";", ":", "-", "—"):
+        return True
+    for p in DANGLING_PHRASES:
+        if lower.endswith(p) or lower.endswith(p + "."):
+            return True
+    for a in ANTICIPATION_LEAD_IN_PHRASES:
+        if lower.endswith(a) or lower.endswith(a + "."):
+            return True
+    words = re.findall(r"[a-zA-Z0-9']+", lower)
+    if not words:
+        return True
+    last_word = words[-1]
+    if last_word in DANGLING_CONNECTIVES:
+        if last_word == "so" and len(words) >= 2 and words[-2] in ("think", "not"):
+            pass
+        else:
+            return True
+    if raw[-1] not in (".", "!", "?"):
+        return True
+    return False
+
+
+def apply_context_preroll_and_postroll(
+    start_s: float,
+    end_s: float,
+    segments: List[Dict[str, Any]],
+    min_duration: float = 25.0,
+    max_duration: float = 58.0,
+    target_sweet_spot: float = 42.0,
+    source_duration: Optional[float] = None,
+) -> tuple[float, float, float]:
+    """
+    Applies intelligent sentence-aware pre-roll and semantic boundary completion.
+    1. Snaps start_s 5-15s earlier to the start of the preceding sentence to capture the catalyst/trigger.
+    2. Scans forward through subsequent sentences to swallow the full explanation or punchline payoff.
+    3. Detects incomplete thoughts, dangling connectives ('and let me', 'because', 'why', etc.) and ensures they never cut mid-sentence.
+    4. If completing a runaway thought would exceed 58.0s, intelligently BACKTRACKS to the previous terminal sentence to guarantee a clean, satisfying finish.
+    5. Enforces a strict minimum of 25.0s and strict hard ceiling of 58.0s.
+    """
+    if not segments:
+        dur = min(max_duration, max(min_duration, end_s - start_s))
+        if source_duration:
+            dur = min(dur, max(0.1, source_duration - start_s))
+        return round(start_s, 2), round(start_s + dur, 2), round(dur, 2)
+
+    # Step 1: Pre-roll Snap to ensure full catalyst/question is captured
+    raw_dur = max(0.1, end_s - start_s)
+    needed_preroll = max(6.0, 32.0 - raw_dur) if raw_dur < 25.0 else 4.0
+    target_pre_start = max(0.0, start_s - needed_preroll)
+
+    snapped_start = start_s
+    best_start_idx = 0
+    for idx, seg in enumerate(segments):
+        s_start = float(seg.get("start", 0.0))
+        if s_start <= start_s and (start_s - s_start) <= 22.0:
+            if abs(s_start - target_pre_start) < abs(snapped_start - target_pre_start):
+                snapped_start = s_start
+                best_start_idx = idx
+
+    # Step 2: Forward scan for complete thought, explanation & payoff
+    best_end_idx = best_start_idx
+    for idx in range(best_start_idx, len(segments)):
+        if float(segments[idx].get("end", 0.0)) >= end_s:
+            best_end_idx = idx
+            break
+
+    curr_idx = best_end_idx
+    while curr_idx < len(segments):
+        seg = segments[curr_idx]
+        seg_end = float(seg.get("end", 0.0))
+        seg_text = seg.get("text", "")
+        potential_dur = seg_end - snapped_start
+
+        if potential_dur > max_duration:
+            break
+
+        best_end_idx = curr_idx
+        if potential_dur >= min_duration and not is_phrase_incomplete(seg_text):
+            if potential_dur >= target_sweet_spot:
+                break
+        curr_idx += 1
+
+    # Step 3: Intelligent Backtrack if candidate ending is still dangling
+    end_seg = segments[best_end_idx]
+    if is_phrase_incomplete(end_seg.get("text", "")):
+        backtrack_idx = best_end_idx - 1
+        while backtrack_idx >= best_start_idx:
+            cand = segments[backtrack_idx]
+            cand_dur = float(cand.get("end", 0.0)) - snapped_start
+            if not is_phrase_incomplete(cand.get("text", "")) and cand_dur >= 15.0:
+                best_end_idx = backtrack_idx
+                break
+            backtrack_idx -= 1
+
+    snapped_end = float(segments[best_end_idx].get("end", end_s)) + 0.8
+    new_dur = snapped_end - snapped_start
+
+    # Step 4: Enforce min_duration
+    if new_dur < min_duration:
+        deficit = min_duration - new_dur
+        expand_start = min(snapped_start, deficit)
+        snapped_start -= expand_start
+        deficit -= expand_start
+        snapped_end += deficit
+        new_dur = snapped_end - snapped_start
+
+    # Step 5: Enforce max_duration & source_duration
+    if new_dur > max_duration:
+        snapped_end = snapped_start + max_duration
+        new_dur = max_duration
+
+    if source_duration and snapped_end > source_duration:
+        snapped_end = source_duration
+        new_dur = max(0.1, snapped_end - snapped_start)
+
+    return round(max(0.0, snapped_start), 2), round(snapped_end, 2), round(new_dur, 2)
 
 
 class LiveStreamService:
@@ -306,30 +651,47 @@ class LiveStreamService:
 
     @staticmethod
     async def get_streamer_clips(db: AsyncSession, streamer_id: str) -> List[Dict[str, Any]]:
-        """Return all clips generated for this streamer."""
-        result = await db.execute(
-            text("""
-                SELECT c.*, e.title as event_title, e.virality_score as event_virality
-                FROM live_stream_events e
-                JOIN generated_clips c ON c.id = e.clip_id
-                WHERE e.streamer_id = :streamer_id AND e.event_type = 'clip_generated'
-                ORDER BY c.created_at DESC
-            """),
-            {"streamer_id": streamer_id},
-        )
+        """Return all clips generated for this streamer or all streamers."""
+        if streamer_id == "all":
+            result = await db.execute(
+                text("""
+                    SELECT c.*, e.title as event_title, e.virality_score as event_virality,
+                           s.name as streamer_name, s.platform as streamer_platform
+                    FROM live_stream_events e
+                    JOIN generated_clips c ON c.id = e.clip_id
+                    LEFT JOIN live_streamers s ON s.id = e.streamer_id
+                    WHERE e.event_type = 'clip_generated'
+                    ORDER BY c.created_at DESC
+                """)
+            )
+        else:
+            result = await db.execute(
+                text("""
+                    SELECT c.*, e.title as event_title, e.virality_score as event_virality,
+                           s.name as streamer_name, s.platform as streamer_platform
+                    FROM live_stream_events e
+                    JOIN generated_clips c ON c.id = e.clip_id
+                    LEFT JOIN live_streamers s ON s.id = e.streamer_id
+                    WHERE e.streamer_id = :streamer_id AND e.event_type = 'clip_generated'
+                    ORDER BY c.created_at DESC
+                """),
+                {"streamer_id": streamer_id},
+            )
         rows = result.fetchall()
         clips = []
         for r in rows:
             clips.append({
-                "id": r.id,
-                "task_id": r.task_id,
+                "id": str(r.id),
+                "task_id": str(r.task_id),
                 "title": r.hook_title or r.event_title or f"Live Clip {r.clip_order}",
                 "filename": r.filename,
-                "url": f"/clips/{r.filename}",
+                "url": f"/api/tasks/{r.task_id}/clips/{r.id}/file",
                 "virality_score": r.virality_score or r.event_virality or 0,
                 "hook": r.reasoning or "",
                 "duration": r.duration,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "streamer_name": getattr(r, "streamer_name", None),
+                "streamer_platform": getattr(r, "streamer_platform", None),
             })
         return clips
 
@@ -348,8 +710,17 @@ class LiveStreamService:
     ) -> ActiveLiveSession:
         """Start rolling FFmpeg capture into 60s segments."""
         with _sessions_lock:
-            if streamer_id in _active_sessions and _active_sessions[streamer_id].is_running:
-                return _active_sessions[streamer_id]
+            existing = _active_sessions.get(streamer_id)
+            if existing and existing.is_running and existing.process and existing.process.poll() is None:
+                existing.task_id = task_id
+                return existing
+
+            # Clean any stale dead process if present
+            if existing and existing.process:
+                try:
+                    existing.process.kill()
+                except Exception:
+                    pass
 
             stream_buffer_dir = BUFFER_DIR / streamer_id
             stream_buffer_dir.mkdir(parents=True, exist_ok=True)
@@ -390,6 +761,7 @@ class LiveStreamService:
             return session
 
     @staticmethod
+    @staticmethod
     def stop_buffer_recording(streamer_id: str) -> None:
         """Gracefully terminate buffer recording and purge temporary chunks."""
         with _sessions_lock:
@@ -405,14 +777,30 @@ class LiveStreamService:
                             session.process.kill()
                         except Exception:
                             pass
-                # Cleanup buffer directory
+                # Cleanup buffer directory immediately
                 if session.buffer_dir.exists():
                     shutil.rmtree(session.buffer_dir, ignore_errors=True)
-                logger.info("Stopped live buffer recording for streamer %s", streamer_id)
+                logger.info("Stopped live buffer recording and deleted buffer directory for streamer %s", streamer_id)
+
+    @staticmethod
+    def clean_analysis_artifacts(analysis_dir: Path) -> None:
+        """Removes temporary analysis video/audio/ass files to prevent storage buildup."""
+        if not analysis_dir.exists():
+            return
+        for filename in ["recent_window.mp4", "recent_window.wav", "concat_list.txt"]:
+            (analysis_dir / filename).unlink(missing_ok=True)
+        # Clean any intermediate source clips or ass files
+        for f in analysis_dir.glob("source_*.mp4"):
+            f.unlink(missing_ok=True)
+        for f in analysis_dir.glob("clip_*.ass"):
+            f.unlink(missing_ok=True)
 
     @staticmethod
     def purge_old_segments(buffer_dir: Path, max_segments: int = 10) -> List[Path]:
-        """Maintain a rolling 10-minute window by keeping at most `max_segments` (60s each)."""
+        """
+        Maintain a rolling buffer window by keeping at most `max_segments` (60s each).
+        Default 10 segments (~10 minutes). Excess old chunks are deleted immediately to keep disk free.
+        """
         chunks = sorted(buffer_dir.glob("chunk_*.mp4"))
         # Exclude the very latest chunk being written right now
         if len(chunks) > max_segments + 1:
@@ -425,6 +813,270 @@ class LiveStreamService:
         # Return currently available completed chunks
         return sorted(buffer_dir.glob("chunk_*.mp4"))
 
+    @staticmethod
+    def cleanup_orphaned_buffers() -> int:
+        """
+        Scans BUFFER_DIR and purges any buffer folders that do NOT belong to an actively running live session.
+        Also enforces a global 10GB quota on BUFFER_DIR to guarantee storage remains free.
+        Returns the number of freed bytes.
+        """
+        freed_bytes = 0
+        if not BUFFER_DIR.exists():
+            return 0
+
+        with _sessions_lock:
+            active_ids = {s_id for s_id, s in _active_sessions.items() if s.is_running}
+
+        for item in BUFFER_DIR.iterdir():
+            if item.is_dir():
+                if item.name not in active_ids:
+                    # Stale or orphaned session from a previous process/restart
+                    try:
+                        dir_size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                        shutil.rmtree(item, ignore_errors=True)
+                        freed_bytes += dir_size
+                        logger.info("Purged orphaned buffer directory: %s (freed %.1f MB)", item.name, dir_size / (1024 * 1024))
+                    except Exception as e:
+                        logger.warning("Could not purge orphaned buffer %s: %s", item, e)
+
+        # Global disk quota check: if BUFFER_DIR exceeds 10 GB, evict oldest chunks (FIFO)
+        try:
+            MAX_BUFFER_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB limit
+            TARGET_BUFFER_BYTES = int(9.0 * 1024 * 1024 * 1024)  # 9 GB target after eviction
+
+            all_files = [f for f in BUFFER_DIR.rglob("*") if f.is_file()]
+            total_size = sum(f.stat().st_size for f in all_files)
+
+            if total_size > MAX_BUFFER_BYTES:
+                logger.warning(
+                    "BUFFER_DIR total size is %.2f GB (exceeds 10GB quota). Automatically deleting oldest buffers...",
+                    total_size / (1024 * 1024 * 1024),
+                )
+                # First clean temporary analysis artifacts
+                for active_id in active_ids:
+                    LiveStreamService.clean_analysis_artifacts(BUFFER_DIR / active_id / "analysis")
+
+                # Collect all completed chunk files across all streamer buffer directories
+                chunks_to_consider = []
+                for s_dir in [d for d in BUFFER_DIR.iterdir() if d.is_dir()]:
+                    dir_chunks = sorted(s_dir.glob("chunk_*.mp4"))
+                    # Preserve the latest active recording file (dir_chunks[-1]) so recording is never interrupted
+                    if len(dir_chunks) > 1:
+                        for chunk in dir_chunks[:-1]:
+                            try:
+                                stat = chunk.stat()
+                                chunks_to_consider.append((stat.st_mtime, stat.st_size, chunk))
+                            except Exception:
+                                pass
+
+                # Sort oldest first (FIFO eviction)
+                chunks_to_consider.sort(key=lambda x: x[0])
+
+                current_size = sum(f.stat().st_size for f in BUFFER_DIR.rglob("*") if f.is_file())
+                deleted_count = 0
+                for _, size, chunk_path in chunks_to_consider:
+                    if current_size <= TARGET_BUFFER_BYTES:
+                        break
+                    try:
+                        chunk_path.unlink(missing_ok=True)
+                        current_size -= size
+                        freed_bytes += size
+                        deleted_count += 1
+                    except Exception as del_err:
+                        logger.debug("Failed deleting chunk %s: %s", chunk_path, del_err)
+
+                logger.info(
+                    "Buffer eviction complete: deleted %d oldest chunks, freed %.2f GB. Current buffer size: %.2f GB",
+                    deleted_count,
+                    freed_bytes / (1024 * 1024 * 1024),
+                    current_size / (1024 * 1024 * 1024),
+                )
+        except Exception as e:
+            logger.warning("Error checking BUFFER_DIR quota: %s", e)
+
+        return freed_bytes
+
+    # -------------------------------------------------------------------------
+    # Unique Hook Title Sanitization & Anti-Repetition Engine
+    # -------------------------------------------------------------------------
+    GENERIC_OR_REPETITIVE_TITLES = {
+        "watchhisfacewhenherealizes",
+        "watchherfacewhensherealizes",
+        "watchtheirfacewhentheyrealize",
+        "thereisnowayhesaidthat",
+        "thereisnowayshesaidthat",
+        "thereisnowaytheysaidthat",
+        "theexactsecondeverythingfellapart",
+        "theexactmomentitfellapart",
+        "livestreamhighlight",
+        "highlightfromstreamer",
+        "instantregretin4k",
+        "waitforit",
+        "hethoughthewassafeuntil",
+        "shethoughtshewassafeuntil",
+        "caughtin4kdoingtheworstthingpossible",
+        "brostartedcelebrating2secondstooearly",
+        "wentfrom200iqto0iqin3seconds",
+        "themostunhingeddmintwitchhistory",
+        "themostunhingedconfessionintwitchhistory",
+        "broforgotthemicwasstillon",
+        "herealizedhismistaketoolate",
+        "sherealizedhermistaketoolate",
+        "brocelebratedtwosecondstooearly",
+        "hecompletelylosthismindlive",
+        "hesaidthequietpartoutloud",
+        "shesaidthequietpartoutloud",
+        "frompurehypetocompletesilence",
+        "thereisnowayheplayedthat",
+        "thereisnowaysheplayedthat",
+    }
+
+    @staticmethod
+    def _normalize_title(t: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', (t or '').lower().replace('#shorts', ''))
+
+    @classmethod
+    def _is_repetitive_or_generic(cls, title: str, existing_norm_set: set[str], existing_raw_list: list[str]) -> bool:
+        clean = (title or "").strip()
+        norm = cls._normalize_title(clean)
+        if not norm or norm in cls.GENERIC_OR_REPETITIVE_TITLES or norm in existing_norm_set:
+            return True
+        words = clean.split()
+        if len(words) < 3 or len(words) > 8:
+            return True
+        for raw in existing_raw_list:
+            norm_r = cls._normalize_title(raw)
+            if norm_r and difflib.SequenceMatcher(None, norm, norm_r).ratio() >= 0.70:
+                return True
+        return False
+
+    @classmethod
+    def _generate_procedural_fallback_title(cls, streamer: str, transcript: str, existing_norm_set: set[str]) -> str:
+        stop_words = {
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "with", "about",
+            "against", "between", "into", "through", "during", "before", "after", "above", "below",
+            "from", "up", "down", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+            "had", "do", "does", "did", "can", "could", "shall", "should", "will", "would", "may",
+            "might", "must", "it", "its", "you", "your", "he", "she", "they", "we", "i", "me", "my",
+            "this", "that", "what", "which", "who", "whom", "here", "there", "when", "where", "why",
+            "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such",
+            "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "just", "like",
+            "oh", "bro", "dude", "okay", "yeah", "gonna", "wanna", "gosh", "omg", "uh", "um", "said",
+            "think", "know", "going", "really", "cant", "dont", "told"
+        }
+        tokens = [re.sub(r'[^a-zA-Z]', '', w) for w in (transcript or "").split()]
+        meaningful = [w.capitalize() for w in tokens if len(w) > 3 and w.lower() not in stop_words]
+        clean_streamer = streamer.capitalize() if streamer and streamer.lower() != "none" else "Streamer"
+
+        # High-CTR psychological headline templates
+        templates = [
+            f"When {clean_streamer} Realized Chat Was Right",
+            f"The Exact Moment {clean_streamer} Snapped",
+            f"{clean_streamer} Caught In 4K Live",
+            f"Why {clean_streamer} Instantly Regretted Answering",
+            f"Chat Completely Stunned {clean_streamer} Live",
+            f"The Wildest Statement On Stream Today",
+            f"When Banter Turned Completely Serious",
+            f"{clean_streamer} Refused To Back Down",
+            f"The One Line That Silenced Chat",
+            f"Nobody Expected {clean_streamer} To Say This",
+            f"{clean_streamer} Dropped An Unfiltered Confession",
+            f"The Decision That Cost {clean_streamer} Everything",
+        ]
+
+        if meaningful:
+            topic = meaningful[0]
+            templates.insert(0, f"When {clean_streamer} Faced {topic} Live")
+            templates.insert(1, f"The Truth About The {topic} Blunder")
+            templates.insert(2, f"{clean_streamer} Completely Lost It Over {topic}")
+            if len(meaningful) >= 2:
+                templates.insert(0, f"{clean_streamer} Reacts To {meaningful[0]} {meaningful[1]}")
+
+        for cand in templates:
+            norm = cls._normalize_title(cand)
+            if norm not in existing_norm_set and norm not in cls.GENERIC_OR_REPETITIVE_TITLES:
+                return cand
+
+        return f"{clean_streamer} Shocking Stream Moment #{int(time.time() * 1000) % 1000}"
+
+    @classmethod
+    async def sanitize_clip_hook_title(
+        cls,
+        raw_title: str,
+        streamer_name: str,
+        transcript: str,
+        reasoning: str,
+        db: AsyncSession,
+    ) -> str:
+        """Guarantees hook_title is 100% unique, non-generic, and content-grounded before burning into video."""
+        existing_raw_list: list[str] = []
+        existing_norm_set: set[str] = set()
+        try:
+            q = await db.execute(text("SELECT hook_title FROM generated_clips WHERE hook_title IS NOT NULL ORDER BY created_at DESC LIMIT 100"))
+            existing_raw_list = [r[0] for r in q.fetchall() if r[0]]
+            existing_norm_set = {cls._normalize_title(t) for t in existing_raw_list}
+        except Exception as e:
+            logger.debug("Failed querying existing titles for hook title check: %s", e)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
+        clean_raw = raw_title.strip().strip('"').strip("'")
+        if not cls._is_repetitive_or_generic(clean_raw, existing_norm_set, existing_raw_list):
+            return clean_raw
+
+        logger.info("Title '%s' for %s is generic or duplicate. Synthesizing unique hook title via AI...", clean_raw, streamer_name)
+        try:
+            agent = AntigravityDirectModel(model_name="antigravity:gemini-1.5-flash")
+            recent_str = "\n".join(f"- {t}" for t in existing_raw_list[:25])
+            prompt = f"""You are an elite viral short-form director clipping live content for "{streamer_name}".
+The title "{clean_raw}" was rejected for being generic, repetitive, or already used.
+Generate 5 completely UNIQUE, HIGH-CTR, CATCHY titles (3 to 7 words only) specifically grounded in this moment's dialogue:
+
+STREAMER: {streamer_name}
+TRANSCRIPT:
+"{transcript[:500]}"
+
+REASONING:
+"{reasoning[:200]}"
+
+CATCHINESS & VIRALITY RULES:
+1. STRICTLY 3 TO 7 WORDS ONLY.
+2. Pique an intense CURIOSITY GAP — the title must pose a situation, conflict, or shocking realization that viewers CANNOT resist clicking to see resolved.
+3. Use high-stakes, active verbs (e.g. Exposed, Silenced, Regretted, Snapped, Backfired, Confessed, Blundered).
+4. Must mention "{streamer_name}" or the specific subject/action from the dialogue. NEVER generate vague or random noun lists.
+5. Plain text only: NO quotes, NO hashtags, NO emojis.
+6. FORBIDDEN to copy or resemble any generic templates or these recent titles:
+{recent_str}
+
+Respond ONLY with a JSON array of 5 unique, catchy title strings:
+["Catchy Title 1", "Catchy Title 2", "Catchy Title 3", "Catchy Title 4", "Catchy Title 5"]
+"""
+            ai_resp = await agent.request(prompt)
+            raw_text = ""
+            for p in getattr(ai_resp, "parts", []):
+                if hasattr(p, "content") and p.content:
+                    raw_text = p.content
+                    break
+            if not raw_text:
+                raw_text = str(ai_resp)
+
+            match = re.search(r"\[\s*\".*\"\s*\]", raw_text, re.DOTALL)
+            if match:
+                cands = json.loads(match.group(0))
+                for cand in cands:
+                    cand_clean = cand.strip().strip('"').strip("'")
+                    if not cls._is_repetitive_or_generic(cand_clean, existing_norm_set, existing_raw_list):
+                        logger.info("Generated new bespoke hook title for %s: '%s'", streamer_name, cand_clean)
+                        return cand_clean
+        except Exception as ai_err:
+            logger.warning("AI unique hook title generation failed for %s: %s", streamer_name, ai_err)
+
+        fallback = cls._generate_procedural_fallback_title(streamer_name, transcript, existing_norm_set)
+        logger.info("Using procedural fallback title for %s: '%s'", streamer_name, fallback)
+        return fallback
+
     # -------------------------------------------------------------------------
     # Sliding AI Moment Detection & Instant Clipping
     # -------------------------------------------------------------------------
@@ -435,19 +1087,35 @@ class LiveStreamService:
         session: ActiveLiveSession,
         min_virality: int = 75,
     ) -> List[Dict[str, Any]]:
-        """Transcribe latest buffer window, analyze with Gemini Flash, and cut viral moments instantly."""
+        """Transcribe latest buffer window, analyze with Gemini Flash, cut viral moments, and auto-clean analysis files."""
+        analysis_dir = session.buffer_dir / "analysis"
+        try:
+            return await LiveStreamService._evaluate_buffer_inner(db, session, min_virality, analysis_dir)
+        finally:
+            LiveStreamService.clean_analysis_artifacts(analysis_dir)
+
+    @staticmethod
+    async def _evaluate_buffer_inner(
+        db: AsyncSession,
+        session: ActiveLiveSession,
+        min_virality: int,
+        analysis_dir: Path,
+    ) -> List[Dict[str, Any]]:
+        """Internal moment evaluation routine."""
         # Get completed chunks (excluding the currently active recording file)
         chunks = sorted(session.buffer_dir.glob("chunk_*.mp4"))
         if len(chunks) < 2:
             return []  # Need at least 1-2 completed minutes
 
-        # Consider the latest 3-5 completed chunks
-        eligible_chunks = chunks[-5:-1] if len(chunks) >= 5 else chunks[:-1]
-        if not eligible_chunks:
+        # Exclude active recording file and verify moov atom integrity
+        valid_chunks = [c for c in chunks[:-1] if _is_valid_mp4(c)]
+        if len(valid_chunks) < 2:
             return []
 
+        # Consider the latest 3-4 completed valid chunks
+        eligible_chunks = valid_chunks[-4:]
+
         # Merge these eligible chunks into a temporary analysis segment
-        analysis_dir = session.buffer_dir / "analysis"
         analysis_dir.mkdir(exist_ok=True)
 
         concat_list_file = analysis_dir / "concat_list.txt"
@@ -458,22 +1126,54 @@ class LiveStreamService:
         merged_video = analysis_dir / "recent_window.mp4"
         merged_audio = analysis_dir / "recent_window.wav"
 
-        # Concat chunks without re-encoding
+        # Concat chunks without re-encoding, regenerating clean timestamps across seams
         subprocess.run(
-            [_ffmpeg_path(), "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list_file), "-c", "copy", str(merged_video)],
+            [
+                _ffmpeg_path(), "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list_file),
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                str(merged_video)
+            ],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
+
+        # Check if merged_video has an audio stream before attempting extraction
+        probe_cmd = [_ffprobe_path(), "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(merged_video)]
+        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+        if not probe_res.stdout.strip():
+            logger.debug("No audio track detected in live stream window for %s, skipping", session.streamer_name)
+            return []
 
         # Extract 16kHz mono WAV for Whisper
-        subprocess.run(
+        res = subprocess.run(
             [_ffmpeg_path(), "-y", "-i", str(merged_video), "-vn", "-ac", "1", "-ar", "16000", str(merged_audio)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            capture_output=True, text=True
         )
+        if res.returncode != 0:
+            logger.warning("Failed to extract audio from %s: %s", merged_video, res.stderr)
+            return []
 
-        # Transcribe with Whisper
-        import whisper
-        model = whisper.load_model("base")
-        whisper_result = await asyncio.to_thread(model.transcribe, str(merged_audio), language="en", fp16=False)
+        if not merged_audio.exists() or merged_audio.stat().st_size < 8000:
+            logger.debug("Extracted audio for %s is empty or too short, skipping", session.streamer_name)
+            return []
+
+        # Transcribe with Whisper (using shared cached model protected by lock)
+        try:
+            model = _get_whisper_model()
+            async with _whisper_async_lock:
+                whisper_result = await asyncio.to_thread(
+                    model.transcribe,
+                    str(merged_audio),
+                    language="en",
+                    fp16=False,
+                    word_timestamps=True,
+                )
+        except Exception as whisper_err:
+            logger.warning("Whisper transcription failed for %s: %s", session.streamer_name, whisper_err)
+            return []
 
         segments = whisper_result.get("segments", [])
         if not segments:
@@ -493,31 +1193,132 @@ class LiveStreamService:
 
         full_transcript = "\n".join(transcript_lines)
 
-        # Prompt Antigravity Gemini Flash bridge
-        prompt = f"""You are a live stream short-form clipper for streamer "{session.streamer_name}".
-Analyze this 2-5 minute window from their ongoing live broadcast.
-Search for standout moments suitable for a 20-60 second vertical TikTok / YouTube Short:
-- High energy reaction, drama, rage, hype, clutch gaming play, funny joke, or memorable punchline.
+        # -----------------------------------------------------------
+        # Step 1.5: Computer Vision - Motion, Posture & Face Emotion
+        # -----------------------------------------------------------
+        try:
+            visual_events = await asyncio.to_thread(analyze_visual_actions, merged_video, 4)
+            visual_lines = [f"[{e['time']}] {e['type']}: {e['detail']}" for e in visual_events]
+            visual_summary = "\n".join(visual_lines) if visual_lines else "Stable stream camera motion with consistent posture."
+        except Exception as vis_err:
+            logger.warning("Visual action analysis failed for %s: %s", session.streamer_name, vis_err)
+            visual_summary = "Visual tracking unavailable."
 
-Transcript:
+        # Fetch recent titles to enforce strict uniqueness without PostgreSQL DISTINCT-ORDER BY conflicts
+        try:
+            recent_titles_q = await db.execute(text("SELECT hook_title FROM generated_clips WHERE hook_title IS NOT NULL ORDER BY created_at DESC LIMIT 50"))
+            recent_titles_raw = list(dict.fromkeys(r[0] for r in recent_titles_q.fetchall() if r[0]))
+            recent_titles_clause = "\n".join(f"- {t}" for t in recent_titles_raw[:20]) if recent_titles_raw else "None"
+        except Exception as title_err:
+            logger.debug("Could not fetch recent titles for uniqueness: %s", title_err)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            recent_titles_clause = "None"
+
+        # Prompt Antigravity Gemini Flash bridge with Multi-Modal Vision + Speech instructions
+        prompt = f"""You are an elite viral short-form director clipping live content for "{session.streamer_name}".
+Analyze this 2-5 minute window from their ongoing live broadcast using BOTH spoken speech AND computer vision action data.
+
+TRANSCRIPT:
 {full_transcript}
+
+FRAME-BY-FRAME VISUAL & EMOTIONAL ACTIONS:
+{visual_summary}
+
+UNIVERSAL MULTI-MODAL VIRALITY MATRIX (APPLIES COLLECTIVELY TO ALL STREAMERS & CONTENT):
+This collective intelligence is derived from 500+ top-performing clips across all genres (gaming, IRL, commentary, podcast, chess, comedy, drama). Apply ALL of these dimensions simultaneously regardless of who is on screen:
+
+1. DURATION & CONTEXTUAL STORY ARC (35-55s TARGET, MIN 25s, MAX 58s):
+   - Target duration MUST be between 35 and 55 seconds (Hard minimum: 25s, Hard ceiling: 58s).
+   - NEVER clip just an isolated 15-20s reaction without its catalyst. Always encompass the full narrative arc:
+     * Setup / Catalyst (0-15s): What video was playing, what question was asked, what chat was read.
+     * Escalation & Climax (15-40s): The scream, chair jump, desk slam, laughter, or shocking realization.
+     * Resolution (40-55s): The immediate aftermath, laughter winding down, or final cynical punchline.
+   - Pacing: Target 80-95 WPM conversational/dramatic pacing with reaction gasps, pauses, and laughter.
+   - STRICT LIMIT: Clips must NEVER exceed 58.0 seconds under any circumstances so they remain 100% eligible for YouTube Shorts.
+
+2. MULTI-MODAL PHYSICAL & VISUAL ACTIONS (CV Optical Flow + Facial Tracking):
+   - Sudden kinetic outbursts: chair jumps, standing up, knocking chairs, violent desk slams, falling out of chair, pacing, aggressive hand gestures.
+   - Posture slumps: hands on head, facepalm, sliding down under the desk in defeat.
+   - High-arousal facial expressions: wide-mouth screams, jaw-drop disbelief, uncontrollable wheezing laughter, intense camera stares.
+   - When visual kinetic spikes occur, correlate them with the accompanying speech to capture the exact peak.
+
+3. UNIVERSAL NARRATIVE & EMOTIONAL HOOK ARCHETYPES:
+   - Impending Doom & Instant Regret: Confidently boasting or celebrating 2 seconds before catastrophic failure or defeat.
+   - Interpersonal & Relationship Conflict: Sibling banter, dating confessions, awkward relationship gossip, breaking character, exposing private secrets, uncomfortable interrogations.
+   - Cynical Video/Chat Reactions: Reacting to external videos, TikToks, or chat takes, building tension, and landing a devastating, cynical, or hilarious punchline right at the end.
+   - Accidental Reveals & "Caught in 4K": Hot mic moments, forgetting the camera is on, studio accidents, breaking props, showing something forbidden on screen.
+   - Ego Clash & Rage Tilt: Heated arguments, competitive meltdowns, screaming at opponents or chat.
+   - STRICTLY DOWN-RANK: Quiet menu navigation, silent technical gameplay, reading chat without a strong reaction, or passive background listening.
+
+4. THE 0-3s INSTANT HOOK:
+   - Clip start_time must land directly on the first provocative question, sudden scream, or visual shock. Zero dead air.
+
+5. STRICT CUTTING BOUNDARIES — WHERE TO CUT AND WHERE NOT TO CUT:
+   - CRITICAL ZERO-DEFECT RULE: NEVER end a clip on an unfinished thought, introductory clause, dangling connective, or mid-sentence explanation.
+   - WHERE NOT TO CUT (ABSOLUTELY FORBIDDEN):
+     * NEVER cut when the speaker ends on: "and", "but", "because", "why", "so", "if", "when", "that", "like", "or", "though", "with", "to".
+     * NEVER cut on an introductory clause: "And let me...", "Let me tell you...", "The reason why...", "Here's what happens...", "Watch this...", "Here it comes...", "Why I would not...".
+     * NEVER cut right as the streamer begins explaining their reasoning! If a streamer says "And let me tell you why I would not do that", the clip MUST include the entire explanation sentence until the thought is 100% complete.
+     * NEVER artificially compress a clip to 15s-20s for "loop rate". A 19s clip that cuts off the explanation is completely useless and broken.
+   - WHERE TO CUT (THE PERFECT OUT-POINT):
+     * Cut ONLY after a complete, standalone sentence that ends with a period (.), question mark (?), or exclamation mark (!).
+     * The viewer MUST hear the full justification, punchline, or reaction resolution.
+     * Allow 0.8s - 1.5s of natural pause/laughter decay after the last word so the final syllable is never chopped.
+
+CRITICAL REQUIREMENT - 100% UNIQUE, CONTENT-SPECIFIC TITLES ("hook_title"):
+The title burned onto the top of the video and shown in the feed MUST FORCE scrolling viewers to click.
+Every single title MUST be completely unique, novel, and specific to what actually happened in this clip.
+
+1. ABSOLUTELY ZERO REPETITION & NO GENERIC TEMPLATES (STRICT):
+   - Every title MUST be 100% unique, novel, and derived directly from this conversation.
+   - FORBIDDEN: Any generic, vague, or reusable phrases that could apply to any stream.
+   - DO NOT repeat, closely resemble, or copy any of these recently used titles:
+{recent_titles_clause}
+
+2. CATCHY, HIGH-CTR PSYCHOLOGICAL FORMULAS (MUST BE IRRESISTIBLY CLICK-FORCING):
+   - Your title MUST force scrolling viewers to stop dead in their tracks using the CURIOSITY GAP.
+   - Pique high emotional stakes, disbelief, unexpected drama, or an unresolved question that ONLY watching the video answers.
+   - Use high-stakes, active verbs (e.g. Exposed, Silenced, Regretted, Snapped, Backfired, Confessed, Blundered).
+   - Mention "{session.streamer_name}" or the specific person/subject in the clip. NEVER generate random words or dry descriptive summaries.
+   - Winning archetypes to adapt dynamically:
+     * When {session.streamer_name} Realized The [Specific Topic/Blunder]
+     * {session.streamer_name} Reacts To The Wildest [Topic/Claim]
+     * The Exact Moment [Specific Event/Accusation] Happened
+     * Chat Completely Stunned {session.streamer_name} With This
+     * Why {session.streamer_name} Had To Speak Out About [Topic]
+     * {session.streamer_name} Dropped An Unfiltered Confession Live
+   - Introduce an intense curiosity gap without spoiling the outcome.
+
+3. STRICT LENGTH: 3 TO 7 WORDS ONLY.
+   - Viewers scroll past long sentences in 0.4s. Keep it punchy, visceral, and readable at a glance.
+   - Plain text only. NO quotes, NO hashtags, NO emojis.
 
 Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 virality):
 [
   {{
     "start_time": "MM:SS",
     "end_time": "MM:SS",
-    "hook_title": "Short punchy title (max 7 words)",
-    "hook": "Opening 3-second hook text",
+    "hook_title": "Unique 3-7 word click-forcing title specific to this clip",
+    "hook": "Opening spoken sentence or immediate hook",
     "virality_score": 88,
-    "reason": "Why this will go viral"
+    "action_archetype": "Visual action type e.g. Chair Jump / Screaming / Sister Banter",
+    "reason": "Why this specific moment will explode in views"
   }}
 ]
 """
         agent = AntigravityDirectModel(model_name="antigravity:gemini-1.5-flash")
         try:
-            ai_resp = await asyncio.to_thread(agent.request, prompt)
-            raw_text = ai_resp.content if hasattr(ai_resp, "content") else str(ai_resp)
+            ai_resp = await agent.request(prompt)
+            raw_text = ""
+            for p in getattr(ai_resp, "parts", []):
+                if hasattr(p, "content") and p.content:
+                    raw_text = p.content
+                    break
+            if not raw_text:
+                raw_text = str(ai_resp)
 
             # Extract JSON block
             json_match = re.search(r"\[\s*\{.*\}\s*\]", raw_text, re.DOTALL)
@@ -547,41 +1348,228 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 p = [float(x) for x in t_str.split(":")]
                 return p[0] * 60 + p[1] if len(p) == 2 else float(p[0])
 
-            start_s = max(0.0, _to_sec(start_str))
-            end_s = max(start_s + 5.0, _to_sec(end_str))
-            duration = end_s - start_s
+            raw_start_s = max(0.0, _to_sec(start_str))
+            raw_end_s = max(raw_start_s + 5.0, _to_sec(end_str))
+
+            # Apply Intelligent Sentence-Aware Context Pre-Roll & Post-Roll
+            # Rewinds 5-15s to capture the trigger/catalyst, snaps to sentence boundaries,
+            # extends post-roll for punchline resolution, enforces 25s min and 58.0s hard cap.
+            start_s, end_s, duration = apply_context_preroll_and_postroll(
+                start_s=raw_start_s,
+                end_s=raw_end_s,
+                segments=segments,
+                min_duration=25.0,
+                max_duration=58.0,
+                target_sweet_spot=42.0,
+            )
+
+            # Format clean MM:SS strings for DB recording
+            start_m, start_rem = divmod(int(start_s), 60)
+            end_m, end_rem = divmod(int(end_s), 60)
+            start_str = f"{start_m:02d}:{start_rem:02d}"
+            end_str = f"{end_m:02d}:{end_rem:02d}"
 
             clip_id = str(uuid.uuid4())
             clip_filename = f"live_{session.streamer_id[:8]}_{int(time.time())}_{clip_id[:8]}.mp4"
             clip_dest = CLIPS_DIR / clip_filename
             CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
-            # Cut and render vertical 9:16 crop with FFmpeg
-            render_cmd = [
-                _ffmpeg_path(),
-                "-y",
-                "-ss", str(start_s),
-                "-to", str(end_s),
+            # Guarantee 100% unique, non-repetitive, and content-grounded hook title before rendering
+            clip_transcript = " ".join(
+                s.get("text", "").strip()
+                for s in segments
+                if s.get("start", 0) <= end_s and s.get("end", 0) >= start_s
+            )
+            moment["hook_title"] = await LiveStreamService.sanitize_clip_hook_title(
+                raw_title=moment.get("hook_title") or "",
+                streamer_name=session.streamer_name,
+                transcript=clip_transcript,
+                reasoning=moment.get("reason") or "",
+                db=db,
+            )
+
+            # -----------------------------------------------------------
+            # Step 1: Extract the moment time range with frame-accurate re-encode
+            # (Prevents GOP boundary tearing, missing references, and video playback freezing)
+            # -----------------------------------------------------------
+            temp_source = analysis_dir / f"source_{clip_id[:8]}.mp4"
+            extract_cmd = [
+                _ffmpeg_path(), "-y",
+                "-ss", str(start_s), "-to", str(end_s),
                 "-i", str(merged_video),
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-avoid_negative_ts", "make_zero",
+                "-fflags", "+genpts",
+                str(temp_source),
+            ]
+            subprocess.run(extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # -----------------------------------------------------------
+            # Step 2: Streamer Ambient Blurred Canvas Format (1080x1920)
+            # Center foreground stream cropped 6% left, 6% right,
+            # 1% top, and 1% bottom, scaled to fill 1080w and centered vertically.
+            # Top and bottom ambient blurred regions remain untouched.
+            # -----------------------------------------------------------
+            video_filter = (
+                "[0:v]split=2[bgsrc][fgsrc];"
+                "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
+                "[fgsrc]crop=trunc(iw*0.88/2)*2:trunc(ih*0.98/2)*2:trunc(iw*0.06/2)*2:trunc(ih*0.01/2)*2,scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2[vout]"
+            )
+            mode = "complex"
+            caption_y = 0.80
+            logger.info(
+                "Applying ambient blurred canvas format with 6%% side crop (1%% top/bottom) for %s (caption_y=0.80)",
+                session.streamer_name,
+            )
+
+            # -----------------------------------------------------------
+            # Step 3: Build styled ASS subtitles with dynamic caption placement
+            # -----------------------------------------------------------
+            ass_path = analysis_dir / f"clip_{clip_id[:8]}.ass"
+            _build_live_clip_ass(
+                segments=segments,
+                start_s=start_s,
+                end_s=end_s,
+                hook_title=moment.get("hook_title") or "",
+                output_ass=ass_path,
+                caption_y=caption_y if caption_y is not None else 0.82,
+            )
+
+            # -----------------------------------------------------------
+            # Step 4: Build the final render command using venv ffmpeg
+            # -----------------------------------------------------------
+            #   (which has libass for subtitle burning).
+            #   Combine the reframing filter with ASS subtitle overlay.
+            # -----------------------------------------------------------
+            has_audio = ffprobe_has_audio(temp_source)
+            escaped_ass = str(ass_path.resolve()).replace(":", "\\:").replace("'", "\\'")
+            subs_frag = f"subtitles=filename='{escaped_ass}'"
+
+            if mode == "complex":
+                # filter_complex graph producing [vout]; append subs after it
+                full_graph = f"{video_filter};[vout]{subs_frag}[v]"
+                render_cmd = [
+                    _ffmpeg_path(), "-y",
+                    "-i", str(temp_source),
+                    "-filter_complex", full_graph,
+                    "-map", "[v]",
+                ]
+            else:
+                # Simple -vf chain (crop+scale); append subs at the end
+                full_vf = f"{video_filter},{subs_frag}"
+                render_cmd = [
+                    _ffmpeg_path(), "-y",
+                    "-i", str(temp_source),
+                    "-vf", full_vf,
+                ]
+
+            if has_audio:
+                render_cmd.extend(["-map", "0:a", "-c:a", "aac", "-b:a", "128k"])
+            render_cmd.extend([
                 "-c:v", "libx264",
                 "-preset", "veryfast",
-                "-crf", "22",
-                "-c:a", "aac",
-                "-b:a", "128k",
+                "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-r", "60",
+                "-g", "60",
+                "-keyint_min", "60",
+                "-sc_threshold", "0",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709",
+                "-colorspace", "bt709",
+                "-movflags", "+faststart",
+                "-shortest",
                 str(clip_dest),
-            ]
-            subprocess.run(render_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ])
+
+            try:
+                subprocess.run(render_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            except subprocess.CalledProcessError as render_exc:
+                logger.warning(
+                    "Face-aware render failed for %s (rc=%s), retrying with blurred-bg fit: %s",
+                    session.streamer_name, render_exc.returncode,
+                    (render_exc.stderr or "")[-500:],
+                )
+                # Retry with safe blurred-bg fit (with 6% side crop and 1% top/bottom crop)
+                safe_filter = (
+                    "[0:v]split=2[bgsrc][fgsrc];"
+                    "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];"
+                    "[fgsrc]crop=trunc(iw*0.88/2)*2:trunc(ih*0.98/2)*2:trunc(iw*0.06/2)*2:trunc(ih*0.01/2)*2,scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{subs_frag}[vout]"
+                )
+                retry_cmd = [
+                    _ffmpeg_path(), "-y",
+                    "-i", str(temp_source),
+                    "-filter_complex", safe_filter,
+                    "-map", "[vout]",
+                ]
+                if has_audio:
+                    retry_cmd.extend(["-map", "0:a", "-c:a", "aac", "-b:a", "128k"])
+                retry_cmd.extend([
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "20",
+                    "-pix_fmt", "yuv420p",
+                    "-r", "60",
+                    "-g", "60",
+                    "-keyint_min", "60",
+                    "-sc_threshold", "0",
+                    "-color_primaries", "bt709",
+                    "-color_trc", "bt709",
+                    "-colorspace", "bt709",
+                    "-movflags", "+faststart",
+                    "-shortest",
+                    str(clip_dest),
+                ])
+                subprocess.run(retry_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Clean up temp source
+            temp_source.unlink(missing_ok=True)
+
+            # -----------------------------------------------------------
+            # Step 5: Strip Old Metadata & Embed Viral Social Metadata
+            # -----------------------------------------------------------
+            hook_title_clean = moment.get("hook_title") or f"Highlight from {session.streamer_name}"
+            streamer_tags = get_streamer_tags(session.streamer_name)
+            try:
+                strip_and_embed_video_metadata(
+                    video_path=clip_dest,
+                    title=hook_title_clean,
+                    streamer_name=session.streamer_name,
+                    custom_tags=streamer_tags,
+                )
+            except Exception as meta_err:
+                logger.warning("Metadata embedding failed for %s: %s", clip_dest.name, meta_err)
+
+            # Get next clip order for this task
+            order_res = await db.execute(
+                text("SELECT COALESCE(MAX(clip_order), 0) + 1 FROM generated_clips WHERE task_id = :task_id"),
+                {"task_id": session.task_id}
+            )
+            next_order = order_res.scalar() or 1
+
+            # Prepare rich workflow metadata
+            clip_workflow_meta = {
+                "tags": streamer_tags,
+                "streamer": session.streamer_name,
+                "platform": session.platform,
+                "action_archetype": moment.get("action_archetype") or "Dynamic Stream Highlight",
+                "metadata_embedded": True,
+                "youtube_ready": True,
+            }
 
             # Insert clip into generated_clips table
             await db.execute(
                 text("""
                     INSERT INTO generated_clips (
                         id, task_id, filename, file_path, start_time, end_time, duration,
-                        virality_score, hook_score, hook_title, reasoning, text, clip_order
+                        relevance_score, virality_score, hook_score, hook_title, reasoning, text, clip_order, workflow_meta
                     ) VALUES (
                         :id, :task_id, :filename, :path, :start_time, :end_time, :duration,
-                        :score, :score, :hook_title, :reason, :text, 1
+                        :relevance, :score, :score, :hook_title, :reason, :text, :clip_order, :wf_meta
                     )
                 """),
                 {
@@ -592,10 +1580,13 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                     "start_time": start_str,
                     "end_time": end_str,
                     "duration": duration,
+                    "relevance": float(score) / 100.0,
                     "score": score,
-                    "hook_title": moment.get("hook_title") or f"Highlight from {session.streamer_name}",
+                    "hook_title": hook_title_clean,
                     "reason": moment.get("reason") or "Standout live moment",
                     "text": moment.get("hook") or "",
+                    "clip_order": next_order,
+                    "wf_meta": json.dumps(clip_workflow_meta),
                 },
             )
 
@@ -622,6 +1613,13 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 clip_id=clip_id,
                 details=moment,
             )
+
+            # If Virality Score >= 95, notify priority queue for youtube_auto_scheduler
+            if score >= 95:
+                logger.info(
+                    "⚡ ULTRA-VIRAL CLIP (Score %d >= 95) detected: '%s'! Queued for prioritized upload via youtube_auto_scheduler (with 3-5 min anti-bot cooldown).",
+                    score, hook_title_clean
+                )
 
             logger.info("Successfully generated live clip: %s (Virality %s)", clip_filename, score)
             generated_clips.append({"clip_id": clip_id, "filename": clip_filename, **moment})

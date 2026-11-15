@@ -1,54 +1,36 @@
-import { headers } from "next/headers";
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
-import { buildBackendAuthHeaders } from "@/lib/backend-auth";
-import { backendTraceHeaders } from "@/server/backend-api";
-
-const API_URL =
-  process.env.BACKEND_INTERNAL_URL ||
-  process.env.NEXT_PUBLIC_API_URL ||
-  "http://localhost:8000";
+import { createProxyResponse, fetchBackend } from "@/server/backend-api";
+import { getServerSession } from "@/server/session";
 
 export async function GET() {
-  const session = await auth.api.getSession({ headers: await headers() });
+  const session = await getServerSession();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const upstream = await fetch(`${API_URL}/live-streamers/`, {
+  const upstream = await fetchBackend("/live-streamers/", {
     method: "GET",
-    headers: {
-      ...buildBackendAuthHeaders(session.user.id),
-      ...(await backendTraceHeaders()),
-    },
+    userId: session.user.id,
     cache: "no-store",
   });
 
-  const data = await upstream.json();
-  return NextResponse.json(data, { status: upstream.status });
+  return createProxyResponse(upstream);
 }
 
 export async function POST(request: Request) {
-  const session = await auth.api.getSession({ headers: await headers() });
+  const session = await getServerSession();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const payload = await request.text();
-  const upstream = await fetch(`${API_URL}/live-streamers/`, {
+  const body = await request.text();
+  const upstream = await fetchBackend("/live-streamers/", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...buildBackendAuthHeaders(session.user.id),
-      ...(await backendTraceHeaders()),
-    },
-    body: payload,
+    userId: session.user.id,
+    extraHeaders: { "Content-Type": "application/json" },
+    body,
   });
 
-  const responseText = await upstream.text();
-  return new NextResponse(responseText, {
-    status: upstream.status,
-    headers: { "Content-Type": "application/json" },
-  });
+  return createProxyResponse(upstream);
 }
