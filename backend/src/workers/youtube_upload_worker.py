@@ -31,6 +31,7 @@ from src.utils.video_metadata import (
 from src.services.thumbnail_generator import generate_viral_thumbnail
 from src.utils.upload_preflight_checklist import run_preflight, log_checklist_results
 from src.services.youtube_performance_tracker import YouTubePerformanceTracker
+from src.services.system_audit_watchdog import SystemAuditWatchdog
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,8 @@ class YouTubeUploadWorker:
         self.uploader = HeadlessYouTubeUploader(headless=True)
         self.last_upload_time = 0.0
         self.last_audit_time = 0.0
+        self.last_compliance_audit_time = 0.0
+        self.compliance_audit_interval = 3 * 3600  # 3 hours
         self.last_uploaded_streamer: Optional[str] = None
         self.daily_limit_active_until = 0.0
         self.current_instant_cooldown = random.randint(INSTANT_MIN_COOLDOWN, INSTANT_MAX_COOLDOWN)
@@ -437,7 +440,16 @@ class YouTubeUploadWorker:
             try:
                 now = time.time()
 
-                # Periodic closed-loop performance audit (every 6 hours)
+                # 1. Automated 3-Hour System Master Checklist Audit
+                if now - self.last_compliance_audit_time >= self.compliance_audit_interval:
+                    try:
+                        logger.info("🛡️ Triggering Scheduled 3-Hour Master Checklist Compliance Audit...")
+                        await SystemAuditWatchdog.run_full_system_audit()
+                        self.last_compliance_audit_time = now
+                    except Exception as comp_err:
+                        logger.error("System compliance audit notice: %s", comp_err)
+
+                # 2. Periodic closed-loop performance audit (every 6 hours)
                 if now - self.last_audit_time >= 6 * 3600:
                     try:
                         await YouTubePerformanceTracker.run_audit_cycle()

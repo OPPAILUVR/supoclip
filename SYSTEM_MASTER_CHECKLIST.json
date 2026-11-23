@@ -1,0 +1,92 @@
+{
+  "system_version": "2.4.0",
+  "last_updated": "2026-11-23T22:20:00Z",
+  "audit_interval_hours": 3,
+  "rules": {
+    "thumbnail": {
+      "mandatory": true,
+      "color_grade": {
+        "saturation_boost": 1.25,
+        "contrast_boost": 1.15
+      },
+      "climax_frame_window": [0.35, 0.60],
+      "typography": {
+        "font": "Impact",
+        "color": "#FFE600",
+        "stroke_color": "#000000",
+        "stroke_width": 10,
+        "drop_shadow": true
+      },
+      "reaction_badge": {
+        "enabled": true,
+        "pill_color": "#E50914",
+        "text_color": "#FFFFFF",
+        "border_color": "#FFFFFF"
+      },
+      "studio_selector": "ytcp-thumbnail-uploader input[type='file'], input#file-loader[accept*='image']",
+      "verification_required": true,
+      "fail_closed": true
+    },
+    "description": {
+      "mandatory": true,
+      "min_characters": 50,
+      "required_elements": [
+        "hook_summary",
+        "streamer_attribution",
+        "original_stream_url",
+        "fair_use_disclaimer_section_107",
+        "shorts_hashtags"
+      ],
+      "fail_closed": true
+    },
+    "title": {
+      "mandatory": true,
+      "format": "content_grounded_action",
+      "required_suffix": "#shorts",
+      "banned_phrases": [
+        "wait for the end",
+        "you won't believe",
+        "insane clip",
+        "part 1"
+      ],
+      "uniqueness_check": true,
+      "fail_closed": true
+    },
+    "zero_drafts": {
+      "policy": "strictly_prohibited",
+      "auto_delete_on_failure": true,
+      "audit_target": 0
+    },
+    "hook_pacing": {
+      "frame_0_action_required": true,
+      "max_dead_air_seconds": 0.0,
+      "pre_roll_trim": "immediate_action_cut",
+      "motion_vector_first_45_frames": true
+    },
+    "cadence_and_fair_share": {
+      "unicorn_98_plus": {
+        "action": "instant_upload",
+        "bypass_daily_caps": true,
+        "cooldown_seconds": 60
+      },
+      "viral_95_plus": {
+        "cooldown_min_seconds": 180,
+        "cooldown_max_seconds": 240,
+        "multi_streamer_daily_cap": 2,
+        "solo_streamer_daily_cap": 5,
+        "dispatch_mode": "alternating_interleaving"
+      },
+      "standard_under_95": {
+        "cooldown_min_seconds": 3000,
+        "cooldown_max_seconds": 6000,
+        "prime_windows": ["morning", "midday", "evening", "night"]
+      }
+    },
+    "storage": {
+      "hard_ceiling_gb": 10.0,
+      "target_headroom_gb": 4.0,
+      "eviction_trigger_gb": 6.0,
+      "eviction_strategy": "FIFO"
+    }
+  }
+}
