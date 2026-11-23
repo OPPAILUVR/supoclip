@@ -333,23 +333,22 @@ SEGMENT SELECTION CRITERIA (EMPIRICAL 1,000-VIDEO VIRALITY MODEL):
    - Relationship drama, sibling banter, awkward confessions, and studio accidents beat technical gameplay
    - Cynical punchlines and video reactions terminating cleanly on the punchline beat passive listening
    - High kinetic chaos, physical challenges, and explosive vocal reactions beat quiet menu navigation
-6. DURATION & STORY ARC (DYNAMIC CONTEXT-BASED, STRICT MIN 30s, FLEXIBLE 30-58s):
-   - You MUST keep every video ABOVE 30 seconds (strict minimum: 30.0s).
-   - It is NOT necessary or desirable to finish every video at 38 seconds! You can increase or decrease length depending on the video's specific context.
-   - Always check the context of the video and decide the length based on what the viewer needs to fully understand the moment:
-     * Setup & Context (0-8s): Ensure enough lead-in context for the viewer to understand who is speaking, who they are talking to, and what the situation/stakes are. Never start abruptly without context.
-     * Escalation & Midpoint Climax (40-48% mark): The tension, hilarious blunder, or shocking revelation.
-     * Full Resolution & Punchline: Let the streamer complete their full thought, explanation, or reaction. NEVER cut off mid-explanation or mid-sentence.
-   - Adjust duration dynamically between 30 and 58 seconds to capture the complete context.
-   - HARD LIMIT: Never exceed 58.0 seconds (YouTube Shorts 60s limit).
+6. FRAME-0 INVERTED HOOK & EMPIRICAL DURATION (RONALD 85%+ STAYED-TO-WATCH BENCHMARK):
+   - CRITICAL HOOK RULE (0.0s - 1.5s): The video MUST start directly on the action, scream, visual shock, punchline, or physical movement.
+   - NEVER prepend 2-8 seconds of slow talking, quiet walking, or dead air context buildup. Viewers decide to swipe in <1.5s; starting with dead air drops retention to <60% (killing the video at 1.4k views).
+   - Any necessary narrative context must follow immediately AFTER the hook or be delivered on top of the action, not before it.
+   - DURATION SWEET SPOT (GROUND-TRUTH MATRIX):
+     * Keep duration between 30.0 and 52.0 seconds (empirical viral mean: 34.8s).
+     * Strictly enforce minimum 30.0s. Never exceed 58.0s.
+     * Extra duration MUST come from the aftermath, punchline completion, and hilarious resolution (post-roll), NEVER from boring pre-roll.
 7. COMPLETE THOUGHTS: Self-contained ideas that make sense alone without missing context
 8. ENTERTAINING & SHAREABLE: Content viewers immediately DM to friends
 9. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping
 
 WHAT A GOOD CLIP FEELS LIKE:
 - A viewer should understand and care without the original title, thumbnail, or previous context
-- Prefer a complete mini-story or argument: setup, tension or claim, specific detail, and payoff
-- Expand a great short moment to nearby contiguous lines when that adds needed setup, stakes, or payoff
+- Prefer a complete mini-story or argument: hook/climax first, followed by rapid tension, specific detail, and full payoff
+- Expand a great short moment to nearby contiguous lines when that adds needed aftermath, stakes, or payoff
 - Strong picks include contrarian claims, mistakes or lessons, concrete examples, before/after moments, frameworks, surprising results, emotionally charged reactions, and complete answers to interesting questions
 - Bad picks include intros, sponsor or CTA sections, vague setup, contextless quote fragments, repeated points, definitions without payoff, meandering background, and answer fragments that require unseen context
 
@@ -357,10 +356,11 @@ VIRALITY SCORING (0-100 total, from four 0-25 subscores):
 For each segment, provide a detailed virality breakdown:
 
 1. HOOK STRENGTH (0-25):
-   - 20-25: Immediately grabs attention (surprising fact, bold claim, intriguing question)
-   - 15-19: Good opener that creates curiosity
-   - 10-14: Decent start but could be stronger
-   - 0-9: Weak or no hook
+   - 20-25: Frame-0 explosive hook: high kinetic action, scream/shock, instant intrigue in first 0.5s.
+   - 15-19: Good opener that creates curiosity quickly.
+   - 10-14: Decent start but slow buildup.
+   - 0-9: Passive dead air, quiet monologue, or boring setup.
+   - STRICT PENALTY: If the segment begins with calm talk or slow context without immediate sensory energy, cap hook_score <= 10.
 
 2. ENGAGEMENT (0-25):
    - 20-25: Highly entertaining, emotional, or dramatic
@@ -369,15 +369,22 @@ For each segment, provide a detailed virality breakdown:
    - 0-9: Flat or boring delivery
 
 3. VALUE (0-25):
-   - 20-25: Actionable insights, unique knowledge, or transformative ideas
-   - 15-19: Useful information most people don't know
+   - 20-25: Actionable insights, unique comedy, or transformative entertainment payoff
+   - 15-19: Useful or funny information most people don't know
    - 10-14: Somewhat informative
    - 0-9: Common knowledge or filler content
 
 4. SHAREABILITY (0-25):
-   - 20-25: "I need to send this to someone" content
+   - 20-25: "I need to send this to someone" content (extreme memes, relatable shock)
    - 15-19: Content worth bookmarking
    - 10-14: Nice but not share-worthy
+   - 0-9: Content nobody would share
+
+BENCHMARK EXEMPLARS (WHAT 95+ VIRALITY LOOKS LIKE):
+- IShowSpeed (Score 98): Sudden physical reaction, barking, screaming at unexpected event, jumping, instant chaos within 0.5s.
+- Kai Cenat (Score 96): Wild celebrity guest collision, uncontrollable laughter outbreak, sudden studio commotion.
+- Asmongold (Score 95): Fierce controversial take with instant table slam or disbelief, highly cynical punchline.
+- Low-Performing Anti-Pattern (Score <= 60): Streamer reading chat quietly, navigating menus, or talking for 8 seconds before anything happens.
    - 0-9: Generic content
 
 HOOK TITLES ("hook_title" per segment):

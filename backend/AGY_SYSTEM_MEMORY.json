@@ -23,7 +23,7 @@
         "highlight_active_word_color": "#FFFF00",
         "ass_active_hex": "&H0000FFFF&",
         "entrance_animation": "spring_bounce_pop",
-        "vertical_position_ratio": 0.80,
+        "vertical_position_ratio": 0.8,
         "safe_zone": "above_youtube_shorts_overlays"
       },
       "target_duration_seconds": 28.0,
@@ -31,7 +31,10 @@
     },
     "thumbnail_generation": {
       "mandatory": true,
-      "aspect_ratios": ["9:16", "16:9"],
+      "aspect_ratios": [
+        "9:16",
+        "16:9"
+      ],
       "typography": "Impact_Bold",
       "color_palette": "Electric_Yellow_and_White",
       "pill_badge": "Red_Background_White_Text",
@@ -58,7 +61,7 @@
       "draft_policy": "NO_ABANDONED_DRAFTS",
       "anti_duplication": {
         "enabled": true,
-        "title_similarity_threshold": 0.70,
+        "title_similarity_threshold": 0.7,
         "action": "skip_duplicates_and_generate_unique_titles"
       },
       "description_and_tags": {
@@ -87,6 +90,18 @@
         "backend/browser_data/youtube_profile"
       ],
       "policy": "NEVER_DELETE_OR_OVERWRITE_WITHOUT_USER_CONSENT"
+    }
+  },
+  "performance_feedback_loop": {
+    "last_audit_at": "2026-11-23T15:54:41.564901+00:00",
+    "total_audited_clips": 0,
+    "breakout_winners": [],
+    "view_jail_30k_pool": [],
+    "dead_zone_under_5k": [],
+    "calibrated_feature_weights": {
+      "motion_vector_weight": 0.45,
+      "acoustic_flux_weight": 0.35,
+      "facial_reaction_weight": 0.2
     }
   }
 }

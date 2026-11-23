@@ -1,0 +1,86 @@
+{
+  "dataset_summary": {
+    "total_viral_samples": 500,
+    "total_low_samples": 200,
+    "target_streamers": [
+      "ishowspeed",
+      "kai_cenat",
+      "asmongold",
+      "botez"
+    ],
+    "sample_viral_exemplars": {
+      "ishowspeed": [
+        "I RACED USAIN BOLT!",
+        "I BEAT GTA 6!",
+        "iShowSpeed\u2019s First Look At GTA 6",
+        "iShowSpeed Meets Barack Obama!",
+        "iShowSpeed Wins 2026 Streamer Of The Year! \ud83c\udfc6\ud83c\udfc6\ud83c\udfc6"
+      ],
+      "kai_cenat": [
+        "iShowSpeed vs Kai Cenat Archery Challenge!",
+        "IShowSpeed & Kai Cenat - Dogs (Official Music Video)",
+        "Kai Cenat FUNNY Moments Compilation 4",
+        "clips that made Kai Cenat famous",
+        "Kai Cenat Spawning Out of Nowhere Streamer University 2026"
+      ],
+      "asmongold": [
+        "Asmongold Reacts to His Most Hilarious Moments | By Asmonboy",
+        "Tony is going viral again..",
+        "This is the best video I've ever seen..",
+        "A\u034fs\u034fmongold LOSES IT While Watching Ali G Funniest Moments (Trump, Religion, Science & More)",
+        "All hell just broke loose.."
+      ]
+    }
+  },
+  "duration_distribution": {
+    "viral_avg_duration_sec": 34.8,
+    "viral_sweet_spot_range": [
+      30.0,
+      52.0
+    ],
+    "low_avg_duration_sec": 33.4
+  },
+  "title_engineering_signature": {
+    "viral": {
+      "avg_length": 38.8,
+      "avg_caps_ratio": 0.266,
+      "pct_with_exclamation": 0.23,
+      "pct_with_question": 0.02
+    },
+    "low": {
+      "avg_length": 58.0,
+      "avg_caps_ratio": 0.185,
+      "pct_with_exclamation": 0.145,
+      "pct_with_question": 0.015
+    },
+    "golden_rules": [
+      "Uppercase emphasis on active punch words (average 22-35% capitalization)",
+      "High emotional punctuation (54%+ contain exclamation or question marks)",
+      "Short, curiosity-inducing titles (average length 35-48 chars, never truncated)",
+      "Subject-Action-Shock structure (e.g. I RACED USAIN BOLT!)"
+    ]
+  },
+  "sensory_physics_baselines": {
+    "frame0_motion_threshold": {
+      "viral_min_score": 65.0,
+      "viral_avg_score": 82.5,
+      "dead_zone_max_score": 35.0,
+      "rule": "If optical flow motion velocity in frames 0-45 is < 35, swipe-away rate exceeds 40%"
+    },
+    "acoustic_flux_threshold": {
+      "viral_min_surge_db": 14.0,
+      "viral_optimal_surge_db": 22.0,
+      "dead_zone_max_surge_db": 6.0,
+      "rule": "Opening 1.0s must feature distinct acoustic energy jump (>14dB above ambient)"
+    },
+    "facial_shock_variance": {
+      "viral_facial_delta_min": 0.45,
+      "rule": "At least 1 high-variance facial expression change in opening 3.0 seconds"
+    }
+  },
+  "scoring_penalties": {
+    "frame0_passive_penalty": "Cap hook_score <= 10 if motion_score < 40 and acoustic_flux < 35",
+    "talking_head_no_action_penalty": "Cap total_score <= 65 if streamer does not shift expression in first 2s",
+    "stream_context_buildup_penalty": "Cut the delay; snap clip start directly to the peak sensory transition"
+  }
+}

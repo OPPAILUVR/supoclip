@@ -30,6 +30,7 @@ from src.utils.video_metadata import (
 )
 from src.services.thumbnail_generator import generate_viral_thumbnail
 from src.utils.upload_preflight_checklist import run_preflight, log_checklist_results
+from src.services.youtube_performance_tracker import YouTubePerformanceTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +56,7 @@ class YouTubeUploadWorker:
         self.engine = create_async_engine(DB_URL)
         self.uploader = HeadlessYouTubeUploader(headless=True)
         self.last_upload_time = 0.0
+        self.last_audit_time = 0.0
         self.daily_limit_active_until = 0.0
         self.current_instant_cooldown = random.randint(INSTANT_MIN_COOLDOWN, INSTANT_MAX_COOLDOWN)
         self.next_regular_scheduled_time = time.time() + random.randint(REGULAR_MIN_COOLDOWN, REGULAR_MAX_COOLDOWN)
@@ -313,6 +315,14 @@ class YouTubeUploadWorker:
         while True:
             try:
                 now = time.time()
+
+                # Periodic closed-loop performance audit (every 6 hours)
+                if now - self.last_audit_time >= 6 * 3600:
+                    try:
+                        await YouTubePerformanceTracker.run_audit_cycle()
+                        self.last_audit_time = now
+                    except Exception as audit_err:
+                        logger.warning("Closed-loop audit cycle warning: %s", audit_err)
 
                 # Check if daily limit cooldown is active
                 if now < self.daily_limit_active_until:

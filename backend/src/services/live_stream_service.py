@@ -30,6 +30,7 @@ from ..media.streamer_layout import detect_streamer_layout
 from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filter_fragment, ffmpeg_escape_filter_path
 from ..utils.motion_analyzer import analyze_visual_actions
 from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
+from ..utils.sensory_analyzer import SensoryAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -337,19 +338,26 @@ def apply_context_preroll_and_postroll(
             dur = min(dur, max(0.1, source_duration - start_s))
         return round(start_s, 2), round(start_s + dur, 2), round(dur, 2)
 
-    # Step 1: Pre-roll Snap to ensure full lead-in context & setup are captured
-    raw_dur = max(0.1, end_s - start_s)
-    needed_preroll = max(6.0, 36.0 - raw_dur) if raw_dur < 30.0 else 5.0
-    target_pre_start = max(0.0, start_s - needed_preroll)
-
+    # Step 1: Frame-0 Hook Snap (Ronald 85%+ Stayed-to-Watch Rule)
+    # The clip must start IMMEDIATELY on the action/shock hook (zero dead air, no 5-15s preamble).
+    # Only snap back minimally (max 0.8s) to avoid clipping the opening word.
     snapped_start = start_s
     best_start_idx = 0
     for idx, seg in enumerate(segments):
         s_start = float(seg.get("start", 0.0))
-        if s_start <= start_s and (start_s - s_start) <= 25.0:
-            if abs(s_start - target_pre_start) < abs(snapped_start - target_pre_start):
+        s_end = float(seg.get("end", 0.0))
+        # Find the segment containing or immediately preceding the action start_s
+        if s_start <= start_s <= s_end:
+            # Snap to start of this sentence/phrase (max 1.0s earlier)
+            if (start_s - s_start) <= 1.2:
                 snapped_start = s_start
-                best_start_idx = idx
+            else:
+                snapped_start = start_s
+            best_start_idx = idx
+            break
+        elif s_start <= start_s:
+            best_start_idx = idx
+            snapped_start = start_s
 
     # Step 2: Forward scan for complete context, thought, explanation & payoff
     best_end_idx = best_start_idx
@@ -1514,6 +1522,30 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 target_sweet_spot=40.0,
             )
 
+            # Multimodal Sensory Physics Evaluation (Ronald 85%+ Stayed-to-Watch Rule)
+            sensory_metrics: Dict[str, Any] = {}
+            try:
+                sensory_metrics = SensoryAnalyzer.analyze_sensory_features(
+                    video_path=str(merged_video),
+                    start_s=start_s,
+                    clip_duration=min(10.0, duration),
+                )
+                if sensory_metrics.get("is_passive_dead_air", False):
+                    logger.info(
+                        "Skipping passive dead-air moment for %s (motion=%.1f, flux=%.1f)",
+                        session.streamer_name,
+                        sensory_metrics.get("motion_score_first_1_5s", 0.0),
+                        sensory_metrics.get("acoustic_flux_score", 0.0),
+                    )
+                    continue
+
+                # Calibrate virality score: 60% semantic AI + 40% objective sensory physics
+                calibrated_score = int(round((score * 0.6) + (sensory_metrics.get("composite_sensory_score", 50.0) * 0.4)))
+                score = min(100, max(0, calibrated_score))
+                moment["virality_score"] = score
+            except Exception as sensory_err:
+                logger.warning("Sensory analysis fallback for %s: %s", session.streamer_name, sensory_err)
+
             # Format clean MM:SS strings for DB recording
             start_m, start_rem = divmod(int(start_s), 60)
             end_m, end_rem = divmod(int(end_s), 60)
@@ -1708,6 +1740,7 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 "streamer": session.streamer_name,
                 "platform": session.platform,
                 "action_archetype": moment.get("action_archetype") or "Dynamic Stream Highlight",
+                "sensory_analysis": sensory_metrics,
                 "metadata_embedded": True,
                 "youtube_ready": True,
             }
