@@ -305,17 +305,23 @@ class YouTubeUploadWorker:
             reasoning=clip.get("reasoning", ""),
         )
 
-        # 3. Generate viral thumbnail
+        # 3. Generate or retrieve viral thumbnail
         thumb_path = None
-        try:
-            thumb_path = generate_viral_thumbnail(
-                video_path=file_path,
-                hook_title=title,
-                streamer_name=streamer_name,
-            )
-            logger.info("Generated high-CTR viral thumbnail: %s", thumb_path.name)
-        except Exception as th_err:
-            logger.warning("Thumbnail notice (non-fatal): %s", th_err)
+        if clip.get("workflow_meta", {}).get("thumbnail_path"):
+            candidate_th = Path(clip["workflow_meta"]["thumbnail_path"])
+            if candidate_th.exists():
+                thumb_path = candidate_th
+
+        if not thumb_path:
+            try:
+                thumb_path = generate_viral_thumbnail(
+                    video_path=file_path,
+                    hook_title=title,
+                    streamer_name=streamer_name,
+                )
+                logger.info("Generated high-CTR viral thumbnail: %s", thumb_path.name)
+            except Exception as th_err:
+                logger.warning("Thumbnail notice (non-fatal): %s", th_err)
 
         # ═══════════════════════════════════════════════════════════════
         # PRE-FLIGHT CHECKLIST GATE — clip stays LOCAL if any check fails

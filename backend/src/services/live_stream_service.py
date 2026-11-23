@@ -31,6 +31,7 @@ from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filt
 from ..utils.motion_analyzer import analyze_visual_actions
 from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
 from ..utils.sensory_analyzer import SensoryAnalyzer
+from .thumbnail_generator import generate_viral_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -1727,6 +1728,18 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
             except Exception as meta_err:
                 logger.warning("Metadata embedding failed for %s: %s", clip_dest.name, meta_err)
 
+            # Generate High-CTR Custom Viral Thumbnail immediately upon rendering
+            thumb_dest = None
+            try:
+                thumb_dest = generate_viral_thumbnail(
+                    video_path=clip_dest,
+                    hook_title=hook_title_clean,
+                    streamer_name=session.streamer_name,
+                )
+                logger.info("Generated high-CTR viral thumbnail for clip %s: %s", clip_id, thumb_dest.name)
+            except Exception as th_err:
+                logger.warning("Thumbnail generation notice for %s: %s", clip_dest.name, th_err)
+
             # Get next clip order for this task
             order_res = await db.execute(
                 text("SELECT COALESCE(MAX(clip_order), 0) + 1 FROM generated_clips WHERE task_id = :task_id"),
@@ -1741,6 +1754,7 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 "platform": session.platform,
                 "action_archetype": moment.get("action_archetype") or "Dynamic Stream Highlight",
                 "sensory_analysis": sensory_metrics,
+                "thumbnail_path": str(thumb_dest) if thumb_dest else None,
                 "metadata_embedded": True,
                 "youtube_ready": True,
             }

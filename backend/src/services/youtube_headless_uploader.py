@@ -368,13 +368,13 @@ class HeadlessYouTubeUploader:
                     try:
                         thumb_file = str(Path(thumbnail_path).resolve())
                         logger.info("Attaching viral thumbnail: %s", Path(thumbnail_path).name)
-                        thumb_input = page.locator("input#file-loader, ytcp-thumbnails-compact-editor input[type='file'], input[type='file'][accept*='image']").first
+                        thumb_input = page.locator("ytcp-thumbnail-uploader input[type='file'], input#file-loader[accept*='image'], ytcp-thumbnails-compact-editor input[type='file'], input[type='file'][accept*='image']").first
                         if await thumb_input.count() > 0:
                             await thumb_input.set_input_files(thumb_file)
                             logger.info("Successfully attached viral thumbnail via input element!")
                             await asyncio.sleep(2)
                         else:
-                            thumb_btn = page.locator("button#select-button, #upload-button, [aria-label*='Upload thumbnail' i], ytcp-button:has-text('Upload thumbnail')").first
+                            thumb_btn = page.locator("button#select-button, #upload-button, [aria-label*='Upload thumbnail' i], ytcp-button:has-text('Upload thumbnail'), ytcp-thumbnail-uploader").first
                             if await thumb_btn.count() > 0 and await thumb_btn.is_visible():
                                 async with page.expect_file_chooser(timeout=5000) as fc_info:
                                     await thumb_btn.click(force=True)
@@ -577,6 +577,25 @@ class HeadlessYouTubeUploader:
 
                 if not is_public:
                     raise RuntimeError(f"Video '{upload_title}' visibility could not be confirmed as Public on YouTube Studio.")
+
+                # Ensure custom viral thumbnail is verified and saved on Studio video details page
+                if video_id and thumbnail_path and Path(thumbnail_path).exists():
+                    try:
+                        edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
+                        logger.info("Ensuring custom viral thumbnail is applied and saved on Studio details page: %s", edit_url)
+                        await page.goto(edit_url, timeout=30000, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                        t_inp = page.locator('ytcp-thumbnail-uploader input[type="file"], input#file-loader[accept*="image"]').first
+                        if await t_inp.count() > 0:
+                            await t_inp.set_input_files(str(Path(thumbnail_path).resolve()))
+                            await asyncio.sleep(3)
+                            save_b = page.locator('#save, button:has-text("Save")').first
+                            if await save_b.is_enabled():
+                                await save_b.click()
+                                logger.info("✅ Verified and saved custom viral thumbnail for video %s in Studio!", video_id)
+                                await asyncio.sleep(3)
+                    except Exception as t_save_err:
+                        logger.warning("Post-upload thumbnail verification notice (non-fatal): %s", t_save_err)
 
                 logger.info("🎉 SUCCESS: Video '%s' is 100%% VERIFIED PUBLIC on YouTube! URL: %s", upload_title, video_url)
 
