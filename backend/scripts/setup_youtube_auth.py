@@ -18,6 +18,7 @@ import os
 import json
 import asyncio
 import argparse
+import subprocess
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -25,6 +26,15 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from src.services.youtube_headless_uploader import HeadlessYouTubeUploader, PROFILE_DIR, COOKIES_FILE
 from playwright.async_api import async_playwright
+
+def bring_to_front():
+    try:
+        subprocess.run([
+            "osascript", "-e",
+            'tell application "Google Chrome for Testing" to activate'
+        ], check=False)
+    except Exception:
+        pass
 
 async def interactive_login():
     print("=" * 65)
@@ -42,14 +52,21 @@ async def interactive_login():
             user_data_dir=str(PROFILE_DIR),
             headless=False,
             viewport={"width": 1280, "height": 850},
-            args=["--disable-blink-features=AutomationControlled"]
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars"
+            ]
         )
+        bring_to_front()
         
         # Get or create page
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
         
         print("Navigating to https://studio.youtube.com ...")
+        bring_to_front()
         try:
             await page.goto("https://studio.youtube.com", timeout=60000)
         except Exception as e:

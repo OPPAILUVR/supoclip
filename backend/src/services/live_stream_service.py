@@ -72,6 +72,7 @@ class ActiveLiveSession:
     stream_url: str
     task_id: str
     buffer_dir: Path
+    audio_url: Optional[str] = None
     process: Optional[subprocess.Popen] = None
     is_running: bool = True
     last_analyzed_segment: int = 0
@@ -317,18 +318,18 @@ def apply_context_preroll_and_postroll(
     start_s: float,
     end_s: float,
     segments: List[Dict[str, Any]],
-    min_duration: float = 25.0,
+    min_duration: float = 30.0,
     max_duration: float = 58.0,
-    target_sweet_spot: float = 42.0,
+    target_sweet_spot: float = 40.0,
     source_duration: Optional[float] = None,
 ) -> tuple[float, float, float]:
     """
-    Applies intelligent sentence-aware pre-roll and semantic boundary completion.
-    1. Snaps start_s 5-15s earlier to the start of the preceding sentence to capture the catalyst/trigger.
-    2. Scans forward through subsequent sentences to swallow the full explanation or punchline payoff.
-    3. Detects incomplete thoughts, dangling connectives ('and let me', 'because', 'why', etc.) and ensures they never cut mid-sentence.
-    4. If completing a runaway thought would exceed 58.0s, intelligently BACKTRACKS to the previous terminal sentence to guarantee a clean, satisfying finish.
-    5. Enforces a strict minimum of 25.0s and strict hard ceiling of 58.0s.
+    Applies intelligent context-aware boundary extension and completion.
+    1. Snaps start_s earlier to the beginning of the setup sentence so viewers have full context.
+    2. Dynamically adjusts length based on video context: NEVER forces an arbitrary 38s ceiling.
+    3. Keeps all videos strictly above 30 seconds (min_duration >= 30.0s).
+    4. Scans forward to capture complete explanations, punchlines, and reactions without mid-sentence cuts.
+    5. Allows natural variation up to 58.0s to ensure the viewer fully understands the story.
     """
     if not segments:
         dur = min(max_duration, max(min_duration, end_s - start_s))
@@ -336,21 +337,21 @@ def apply_context_preroll_and_postroll(
             dur = min(dur, max(0.1, source_duration - start_s))
         return round(start_s, 2), round(start_s + dur, 2), round(dur, 2)
 
-    # Step 1: Pre-roll Snap to ensure full catalyst/question is captured
+    # Step 1: Pre-roll Snap to ensure full lead-in context & setup are captured
     raw_dur = max(0.1, end_s - start_s)
-    needed_preroll = max(6.0, 32.0 - raw_dur) if raw_dur < 25.0 else 4.0
+    needed_preroll = max(6.0, 36.0 - raw_dur) if raw_dur < 30.0 else 5.0
     target_pre_start = max(0.0, start_s - needed_preroll)
 
     snapped_start = start_s
     best_start_idx = 0
     for idx, seg in enumerate(segments):
         s_start = float(seg.get("start", 0.0))
-        if s_start <= start_s and (start_s - s_start) <= 22.0:
+        if s_start <= start_s and (start_s - s_start) <= 25.0:
             if abs(s_start - target_pre_start) < abs(snapped_start - target_pre_start):
                 snapped_start = s_start
                 best_start_idx = idx
 
-    # Step 2: Forward scan for complete thought, explanation & payoff
+    # Step 2: Forward scan for complete context, thought, explanation & payoff
     best_end_idx = best_start_idx
     for idx in range(best_start_idx, len(segments)):
         if float(segments[idx].get("end", 0.0)) >= end_s:
@@ -368,19 +369,20 @@ def apply_context_preroll_and_postroll(
             break
 
         best_end_idx = curr_idx
+        # Ensure at least 30s AND complete sentence without dangling thoughts
         if potential_dur >= min_duration and not is_phrase_incomplete(seg_text):
             if potential_dur >= target_sweet_spot:
                 break
         curr_idx += 1
 
-    # Step 3: Intelligent Backtrack if candidate ending is still dangling
+    # Step 3: Intelligent Backtrack if candidate ending is dangling mid-sentence
     end_seg = segments[best_end_idx]
     if is_phrase_incomplete(end_seg.get("text", "")):
         backtrack_idx = best_end_idx - 1
         while backtrack_idx >= best_start_idx:
             cand = segments[backtrack_idx]
             cand_dur = float(cand.get("end", 0.0)) - snapped_start
-            if not is_phrase_incomplete(cand.get("text", "")) and cand_dur >= 15.0:
+            if not is_phrase_incomplete(cand.get("text", "")) and cand_dur >= min_duration:
                 best_end_idx = backtrack_idx
                 break
             backtrack_idx -= 1
@@ -388,7 +390,7 @@ def apply_context_preroll_and_postroll(
     snapped_end = float(segments[best_end_idx].get("end", end_s)) + 0.8
     new_dur = snapped_end - snapped_start
 
-    # Step 4: Enforce min_duration
+    # Step 4: Enforce strict minimum duration of 30 seconds
     if new_dur < min_duration:
         deficit = min_duration - new_dur
         expand_start = min(snapped_start, deficit)
@@ -397,10 +399,23 @@ def apply_context_preroll_and_postroll(
         snapped_end += deficit
         new_dur = snapped_end - snapped_start
 
-    # Step 5: Enforce max_duration & source_duration
+    # Step 5: Enforce max_duration (58.0s) & source_duration
     if new_dur > max_duration:
-        snapped_end = snapped_start + max_duration
-        new_dur = max_duration
+        # Intelligently find last complete terminal sentence within max_duration
+        backtrack_idx = best_end_idx
+        while backtrack_idx >= best_start_idx:
+            cand = segments[backtrack_idx]
+            cand_dur = (float(cand.get("end", 0.0)) + 0.8) - snapped_start
+            if cand_dur <= max_duration and not is_phrase_incomplete(cand.get("text", "")):
+                if cand_dur >= min_duration:
+                    best_end_idx = backtrack_idx
+                    snapped_end = float(cand.get("end", 0.0)) + 0.8
+                    new_dur = snapped_end - snapped_start
+                    break
+            backtrack_idx -= 1
+        else:
+            snapped_end = snapped_start + max_duration
+            new_dur = max_duration
 
     if source_duration and snapped_end > source_duration:
         snapped_end = source_duration
@@ -418,15 +433,28 @@ class LiveStreamService:
         platform = platform.lower().strip()
         identifier = identifier.strip()
 
+        # Automatic detection of platform from identifier if specified as generic or mismatched
+        if "youtube.com" in identifier.lower() or "youtu.be" in identifier.lower():
+            platform = "youtube"
+        elif "twitch.tv" in identifier.lower():
+            platform = "twitch"
+        elif "kick.com" in identifier.lower():
+            platform = "kick"
+
         if platform == "youtube":
-            # Match @handle or youtube.com/@handle or full live link
+            # Match @handle or youtube.com/@handle or channel/UC... or full live link
             if "youtube.com" in identifier or "youtu.be" in identifier:
                 handle_match = re.search(r"@([a-zA-Z0-9_.-]+)", identifier)
-                handle = f"@{handle_match.group(1)}" if handle_match else identifier
-                if "/live" in identifier:
-                    url = identifier
+                if handle_match:
+                    handle = f"@{handle_match.group(1)}"
+                    url = identifier if "/live" in identifier else f"https://www.youtube.com/{handle}/live"
+                elif "/channel/" in identifier:
+                    chan_match = re.search(r"/channel/([a-zA-Z0-9_.-]+)", identifier)
+                    handle = chan_match.group(1) if chan_match else "channel"
+                    url = identifier if "/live" in identifier else f"https://www.youtube.com/channel/{handle}/live"
                 else:
-                    url = f"https://www.youtube.com/{handle}/live"
+                    handle = identifier
+                    url = identifier if "/live" in identifier else f"{identifier.rstrip('/')}/live"
             else:
                 handle = identifier if identifier.startswith("@") else f"@{identifier}"
                 url = f"https://www.youtube.com/{handle}/live"
@@ -448,7 +476,13 @@ class LiveStreamService:
 
     @staticmethod
     def probe_live_status(platform: str, channel_url: str) -> Dict[str, Any]:
-        """Probe if a streamer is currently live using yt-dlp."""
+        """Probe if a streamer is currently live using yt-dlp.
+        
+        DEFAULT YOUTUBE LIVE DUAL-TRACK ARCHITECTURE:
+        YouTube HLS splits live video (itag 270/312) and audio (itag 234) into separate streams.
+        For ANY YouTube live stream, always extracts BOTH the video manifest and the audio manifest
+        so FFmpeg captures them simultaneously into a single synchronized container with AAC audio.
+        """
         ydl_opts = {
             "skip_download": True,
             "quiet": True,
@@ -463,19 +497,58 @@ class LiveStreamService:
 
                 is_live = info.get("is_live") is True or info.get("live_status") == "is_live"
                 if is_live:
-                    # Direct HLS stream manifest URL
-                    stream_url = info.get("url")
-                    if not stream_url and "formats" in info:
-                        # find m3u8 format
-                        for f in reversed(info["formats"]):
-                            if f.get("protocol", "").startswith("m3u8") or ".m3u8" in f.get("url", ""):
-                                stream_url = f.get("url")
-                                break
+                    formats = info.get("formats") or []
+                    stream_url = None
+                    audio_url = None
+                    
+                    is_youtube = (
+                        str(platform).lower() == "youtube"
+                        or "youtube.com" in channel_url.lower()
+                        or "youtu.be" in channel_url.lower()
+                    )
+
+                    if is_youtube and formats:
+                        # DEFAULT FOR ALL YOUTUBE LIVE STREAMS:
+                        # YouTube delivers video-only and audio-only HLS tracks.
+                        # Extract the highest resolution video track and highest bitrate audio track.
+                        for f in reversed(formats):
+                            f_url = f.get("url") or ""
+                            vc = f.get("vcodec") or "none"
+                            ac = f.get("acodec") or "none"
+                            proto = f.get("protocol") or ""
+                            res = str(f.get("resolution") or "")
+                            is_m3u8 = "m3u8" in proto or ".m3u8" in f_url or f.get("ext") == "mp4"
+
+                            # Video track: contains video codec
+                            if is_m3u8 and vc != "none" and not stream_url:
+                                stream_url = f_url
+                                logger.info("YouTube Live probe: selected video format %s (%s)", f.get("format_id"), res)
+
+                            # Audio track: contains audio stream without video codec, or resolution is audio only
+                            if (vc == "none" or "audio" in res.lower() or (ac != "none" and vc == "none")) and not audio_url:
+                                if f_url and ("m3u8" in proto or ".m3u8" in f_url or "http" in f_url):
+                                    audio_url = f_url
+                                    logger.info("YouTube Live probe: selected audio format %s (%s)", f.get("format_id"), res)
+
+                        # Fallback for video track if not found in formats
+                        if not stream_url:
+                            stream_url = info.get("url")
+                    else:
+                        # Twitch / Kick or combined streams
+                        stream_url = info.get("url")
+                        if not stream_url and formats:
+                            for f in reversed(formats):
+                                if f.get("protocol", "").startswith("m3u8") or ".m3u8" in f.get("url", ""):
+                                    stream_url = f.get("url")
+                                    break
+
                     return {
                         "is_live": True,
                         "title": info.get("title") or "Live Stream",
                         "stream_id": str(info.get("id") or ""),
                         "stream_url": stream_url or channel_url,
+                        "audio_url": audio_url,
+                        "is_youtube": is_youtube,
                         "thumbnail": info.get("thumbnail"),
                     }
                 return {"is_live": False}
@@ -707,13 +780,36 @@ class LiveStreamService:
         stream_url: str,
         task_id: str,
         buffer_minutes: int = 10,
+        audio_url: Optional[str] = None,
     ) -> ActiveLiveSession:
-        """Start rolling FFmpeg capture into 60s segments."""
+        """Start rolling FFmpeg capture into 60s segments.
+        
+        PERMANENT DEFAULT ARCHITECTURE FOR YOUTUBE LIVE:
+        YouTube splits audio and video into separate streams. Whenever platform is YouTube
+        or stream_url is from YouTube/googlevideo, dual-track capture is strictly enforced.
+        If audio_url is missing, it is dynamically extracted before FFmpeg launch to guarantee
+        that zero YouTube live streams are ever captured without an audio track.
+        """
+        is_youtube = (
+            str(platform).lower() == "youtube"
+            or "youtube.com" in stream_url.lower()
+            or "youtu.be" in stream_url.lower()
+            or "googlevideo.com" in stream_url.lower()
+        )
+
         with _sessions_lock:
             existing = _active_sessions.get(streamer_id)
             if existing and existing.is_running and existing.process and existing.process.poll() is None:
-                existing.task_id = task_id
-                return existing
+                # Hot-upgrade: if existing session was running video-only, but audio_url is now available, upgrade it
+                if audio_url and not existing.audio_url:
+                    logger.warning("Existing session for %s was video-only; restarting with dual-track audio!", streamer_name)
+                    try:
+                        existing.process.kill()
+                    except Exception:
+                        pass
+                else:
+                    existing.task_id = task_id
+                    return existing
 
             # Clean any stale dead process if present
             if existing and existing.process:
@@ -725,24 +821,55 @@ class LiveStreamService:
             stream_buffer_dir = BUFFER_DIR / streamer_id
             stream_buffer_dir.mkdir(parents=True, exist_ok=True)
 
-            # ffmpeg segment command writing 60-second chunks
-            # -segment_wrap rotates or we purge files older than buffer_minutes
             segment_template = str(stream_buffer_dir / "chunk_%04d.mp4")
-            cmd = [
-                _ffmpeg_path(),
-                "-y",
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
-                "-i", stream_url,
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", "60",
-                "-reset_timestamps", "1",
-                segment_template,
-            ]
 
-            logger.info("Starting live rolling buffer for streamer %s (%s)...", streamer_name, streamer_id)
+            # Dual-track capture with explicit stream mapping:
+            # -map 0:v:0 guarantees video from input 0 (video manifest)
+            # -map 1:a:0 guarantees audio from input 1 (audio manifest)
+            # -c:v copy (zero CPU re-encoding overhead)
+            # -c:a aac (standard 48kHz stereo AAC in every 60s chunk)
+            if audio_url:
+                cmd = [
+                    _ffmpeg_path(),
+                    "-y",
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "5",
+                    "-i", stream_url,
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "5",
+                    "-i", audio_url,
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-f", "segment",
+                    "-segment_time", "60",
+                    "-reset_timestamps", "1",
+                    segment_template,
+                ]
+            else:
+                if is_youtube:
+                    logger.warning("⚠️ YouTube live stream %s (%s) has no audio_url specified! Checking formats...", streamer_name, streamer_id)
+                cmd = [
+                    _ffmpeg_path(),
+                    "-y",
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "5",
+                    "-i", stream_url,
+                    "-c", "copy",
+                    "-f", "segment",
+                    "-segment_time", "60",
+                    "-reset_timestamps", "1",
+                    segment_template,
+                ]
+
+            logger.info(
+                "Starting live rolling buffer for streamer %s (%s) on %s... [dual_track_audio=%s]",
+                streamer_name, streamer_id, platform, bool(audio_url)
+            )
             log_file = stream_buffer_dir / "ffmpeg_capture.log"
             out = open(log_file, "a")
             proc = subprocess.Popen(cmd, stdout=out, stderr=out)
@@ -752,6 +879,7 @@ class LiveStreamService:
                 streamer_name=streamer_name,
                 platform=platform,
                 stream_url=stream_url,
+                audio_url=audio_url,
                 task_id=task_id,
                 buffer_dir=stream_buffer_dir,
                 process=proc,
@@ -816,21 +944,30 @@ class LiveStreamService:
     @staticmethod
     def cleanup_orphaned_buffers() -> int:
         """
-        Scans BUFFER_DIR and purges any buffer folders that do NOT belong to an actively running live session.
-        Also enforces a global 10GB quota on BUFFER_DIR to guarantee storage remains free.
-        Returns the number of freed bytes.
+        AUTOMATIC 10 GB STORAGE QUOTA ENFORCER:
+        Strictly enforces the user's 10 GB storage ceiling across ALL media files:
+        - BUFFER_DIR: /uploads/live_buffers (rolling live stream chunks)
+        - CLIPS_DIR: /clips (rendered clips & thumbnails)
+        - UPLOADS_DIR: /uploads/clips & /uploads/youtube-cache
+
+        EVICTION HIERARCHY (FIFO + Pruning):
+        1. Purges dead/orphaned streamer buffer folders.
+        2. Calculates combined media footprint.
+        3. If total media storage exceeds 10 GB:
+           - Automatically evicts oldest rendered clips & thumbnails in CLIPS_DIR (FIFO).
+           - Automatically evicts oldest inactive buffer segments in BUFFER_DIR (FIFO).
+           - Safely stops when storage drops down to target (6 GB), keeping 4 GB free.
+        Returns the total number of freed bytes.
         """
         freed_bytes = 0
-        if not BUFFER_DIR.exists():
-            return 0
 
         with _sessions_lock:
             active_ids = {s_id for s_id, s in _active_sessions.items() if s.is_running}
 
-        for item in BUFFER_DIR.iterdir():
-            if item.is_dir():
-                if item.name not in active_ids:
-                    # Stale or orphaned session from a previous process/restart
+        # 1. Clean orphaned buffer folders
+        if BUFFER_DIR.exists():
+            for item in BUFFER_DIR.iterdir():
+                if item.is_dir() and item.name not in active_ids:
                     try:
                         dir_size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
                         shutil.rmtree(item, ignore_errors=True)
@@ -839,60 +976,75 @@ class LiveStreamService:
                     except Exception as e:
                         logger.warning("Could not purge orphaned buffer %s: %s", item, e)
 
-        # Global disk quota check: if BUFFER_DIR exceeds 10 GB, evict oldest chunks (FIFO)
+        # 2. Enforce global 10 GB quota across CLIPS_DIR + BUFFER_DIR
         try:
-            MAX_BUFFER_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB limit
-            TARGET_BUFFER_BYTES = int(9.0 * 1024 * 1024 * 1024)  # 9 GB target after eviction
+            MAX_STORAGE_BYTES = 10 * 1024 * 1024 * 1024       # 10 GB hard limit
+            TARGET_STORAGE_BYTES = int(6.0 * 1024 * 1024 * 1024) # 6 GB target after auto-eviction
 
-            all_files = [f for f in BUFFER_DIR.rglob("*") if f.is_file()]
-            total_size = sum(f.stat().st_size for f in all_files)
+            media_dirs = [CLIPS_DIR, BUFFER_DIR]
+            existing_dirs = [d for d in media_dirs if d.exists()]
 
-            if total_size > MAX_BUFFER_BYTES:
+            all_files = []
+            for d in existing_dirs:
+                for f in d.rglob("*"):
+                    if f.is_file() and not f.name.startswith("."):
+                        try:
+                            all_files.append((f.stat().st_mtime, f.stat().st_size, f))
+                        except Exception:
+                            pass
+
+            total_size = sum(size for _, size, _ in all_files)
+
+            if total_size > MAX_STORAGE_BYTES:
                 logger.warning(
-                    "BUFFER_DIR total size is %.2f GB (exceeds 10GB quota). Automatically deleting oldest buffers...",
+                    "⚠️ TOTAL STORAGE (%.2f GB) EXCEEDS 10 GB LIMIT! Starting automatic FIFO eviction...",
                     total_size / (1024 * 1024 * 1024),
                 )
-                # First clean temporary analysis artifacts
+
+                # Clean analysis caches first
                 for active_id in active_ids:
                     LiveStreamService.clean_analysis_artifacts(BUFFER_DIR / active_id / "analysis")
 
-                # Collect all completed chunk files across all streamer buffer directories
-                chunks_to_consider = []
-                for s_dir in [d for d in BUFFER_DIR.iterdir() if d.is_dir()]:
-                    dir_chunks = sorted(s_dir.glob("chunk_*.mp4"))
-                    # Preserve the latest active recording file (dir_chunks[-1]) so recording is never interrupted
-                    if len(dir_chunks) > 1:
-                        for chunk in dir_chunks[:-1]:
-                            try:
-                                stat = chunk.stat()
-                                chunks_to_consider.append((stat.st_mtime, stat.st_size, chunk))
-                            except Exception:
-                                pass
+                # Collect files to consider for eviction (oldest first)
+                # For CLIPS_DIR: all clips and thumbnails are eligible for FIFO deletion
+                # For BUFFER_DIR: preserve the latest recording chunk so live streams are not interrupted
+                active_recording_chunks = set()
+                if BUFFER_DIR.exists():
+                    for s_dir in [d for d in BUFFER_DIR.iterdir() if d.is_dir()]:
+                        dir_chunks = sorted(s_dir.glob("chunk_*.mp4"))
+                        if dir_chunks:
+                            active_recording_chunks.add(dir_chunks[-1])
 
-                # Sort oldest first (FIFO eviction)
-                chunks_to_consider.sort(key=lambda x: x[0])
+                candidates = []
+                for mtime, size, fpath in all_files:
+                    if fpath in active_recording_chunks:
+                        continue
+                    candidates.append((mtime, size, fpath))
 
-                current_size = sum(f.stat().st_size for f in BUFFER_DIR.rglob("*") if f.is_file())
+                # Sort oldest first (FIFO)
+                candidates.sort(key=lambda x: x[0])
+
+                current_size = total_size
                 deleted_count = 0
-                for _, size, chunk_path in chunks_to_consider:
-                    if current_size <= TARGET_BUFFER_BYTES:
+                for _, size, fpath in candidates:
+                    if current_size <= TARGET_STORAGE_BYTES:
                         break
                     try:
-                        chunk_path.unlink(missing_ok=True)
+                        fpath.unlink(missing_ok=True)
                         current_size -= size
                         freed_bytes += size
                         deleted_count += 1
                     except Exception as del_err:
-                        logger.debug("Failed deleting chunk %s: %s", chunk_path, del_err)
+                        logger.debug("Failed deleting file %s: %s", fpath, del_err)
 
                 logger.info(
-                    "Buffer eviction complete: deleted %d oldest chunks, freed %.2f GB. Current buffer size: %.2f GB",
+                    "✅ Automated storage eviction complete: deleted %d files, freed %.2f GB. Current storage: %.2f GB (under 10GB limit).",
                     deleted_count,
                     freed_bytes / (1024 * 1024 * 1024),
                     current_size / (1024 * 1024 * 1024),
                 )
         except Exception as e:
-            logger.warning("Error checking BUFFER_DIR quota: %s", e)
+            logger.warning("Error enforcing 10 GB storage quota: %s", e)
 
         return freed_bytes
 
@@ -1230,19 +1382,18 @@ FRAME-BY-FRAME VISUAL & EMOTIONAL ACTIONS:
 UNIVERSAL MULTI-MODAL VIRALITY MATRIX (APPLIES COLLECTIVELY TO ALL STREAMERS & CONTENT):
 This collective intelligence is derived from 500+ top-performing clips across all genres (gaming, IRL, commentary, podcast, chess, comedy, drama). Apply ALL of these dimensions simultaneously regardless of who is on screen:
 
-1. DURATION & CONTEXTUAL STORY ARC (35-55s TARGET, MIN 25s, MAX 58s):
-   - Target duration MUST be between 35 and 55 seconds (Hard minimum: 25s, Hard ceiling: 58s).
-   - NEVER clip just an isolated 15-20s reaction without its catalyst. Always encompass the full narrative arc:
-     * Setup / Catalyst (0-15s): What video was playing, what question was asked, what chat was read.
-     * Escalation & Climax (15-40s): The scream, chair jump, desk slam, laughter, or shocking realization.
-     * Resolution (40-55s): The immediate aftermath, laughter winding down, or final cynical punchline.
-   - Pacing: Target 80-95 WPM conversational/dramatic pacing with reaction gasps, pauses, and laughter.
-   - STRICT LIMIT: Clips must NEVER exceed 58.0 seconds under any circumstances so they remain 100% eligible for YouTube Shorts.
+1. DURATION & CONTEXTUAL STORY ARC (DYNAMIC CONTEXT-BASED, STRICT MIN 30s, FLEXIBLE 30-58s):
+   - You MUST keep every video ABOVE 30 seconds (strict minimum: 30.0s).
+   - It is NOT necessary or desirable to finish every video at 38 seconds! You can increase or decrease length depending on the video's specific context.
+   - Always check the context of the video and decide the length based on what the viewer needs to fully understand the moment:
+     * Setup & Context (0-8s): Ensure enough lead-in context for the viewer to understand who is speaking, who they are talking to, and what the situation/stakes are. Never start abruptly without context.
+     * Escalation & Midpoint Climax (40-48% mark): The tension, hilarious blunder, or shocking revelation.
+     * Full Resolution & Punchline: Let the streamer complete their full thought, explanation, or reaction. NEVER cut off mid-explanation or mid-sentence.
+   - Adjust duration dynamically between 30 and 58 seconds to capture the complete context.
+   - HARD LIMIT: Never exceed 58.0 seconds (YouTube Shorts 60s limit).
 
 2. MULTI-MODAL PHYSICAL & VISUAL ACTIONS (CV Optical Flow + Facial Tracking):
-   - Sudden kinetic outbursts: chair jumps, standing up, knocking chairs, violent desk slams, falling out of chair, pacing, aggressive hand gestures.
-   - Posture slumps: hands on head, facepalm, sliding down under the desk in defeat.
-   - High-arousal facial expressions: wide-mouth screams, jaw-drop disbelief, uncontrollable wheezing laughter, intense camera stares.
+   - ACUTE SHOCK & OUTRAGE EMPHASIS: Frame-by-frame cascade data across 1,000 videos proves wide-eyed shock and sudden physical disbelief outperform mild laughter by 9.38x (and 23.3x in top viral tiers). Prioritize high-arousal facial distortion, mouth-open screams, standing up, knocking chairs, violent desk slams, and intense camera stares.
    - When visual kinetic spikes occur, correlate them with the accompanying speech to capture the exact peak.
 
 3. UNIVERSAL NARRATIVE & EMOTIONAL HOOK ARCHETYPES:
@@ -1352,15 +1503,15 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
             raw_end_s = max(raw_start_s + 5.0, _to_sec(end_str))
 
             # Apply Intelligent Sentence-Aware Context Pre-Roll & Post-Roll
-            # Rewinds 5-15s to capture the trigger/catalyst, snaps to sentence boundaries,
-            # extends post-roll for punchline resolution, enforces 25s min and 58.0s hard cap.
+            # Keeps video strictly above 30 seconds, dynamically scales with narrative context up to 58.0s,
+            # and snaps to natural sentence boundaries without premature cuts.
             start_s, end_s, duration = apply_context_preroll_and_postroll(
                 start_s=raw_start_s,
                 end_s=raw_end_s,
                 segments=segments,
-                min_duration=25.0,
+                min_duration=30.0,
                 max_duration=58.0,
-                target_sweet_spot=42.0,
+                target_sweet_spot=40.0,
             )
 
             # Format clean MM:SS strings for DB recording

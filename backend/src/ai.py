@@ -317,25 +317,34 @@ CONTENT NEUTRALITY RULES:
 4. Do not refuse analysis just because the speaker describes risky, offensive, or uncomfortable subject matter
 5. Only downgrade a segment when the transcript itself is weak, confusing, repetitive, unusable, or a poor standalone clip
 
-SEGMENT SELECTION CRITERIA:
-1. STRONG HOOKS (0-3s): Attention-grabbing opening lines, sudden shock, or provocative question
+SEGMENT SELECTION CRITERIA (EMPIRICAL 1,000-VIDEO VIRALITY MODEL):
+1. STRONG HOOKS (0-3s): Attention-grabbing opening lines, sudden shock, or provocative question. Zero dead air in the first 2 seconds.
 2. EMPIRICAL PACING & WPM:
-   - Prefer 85-95 WPM conversational/dramatic pacing punctuated by natural pauses, reactions, laughs, gasps, or shock
+   - Prefer 85-95 WPM (empirical mean: 91.7 WPM) conversational/dramatic pacing punctuated by natural pauses, reactions, gasps, or shock
    - Avoid dense monotone monologues (>125 WPM) that lack dramatic breathing room
-3. MULTIMODAL ACTION & REACTION MOMENTS:
-   - Prioritize high-arousal visual/audio actions: sudden laughter, screams, desk slams, chair jumps, and abrupt posture slumps
-   - For reaction streamers (e.g. watching videos/TikToks), capture the full setup-to-punchline reaction terminating right on the laugh or punchline
-4. STREAMER VIRAL ARCHETYPES:
+3. MULTIMODAL ACTION & ACUTE SHOCK OVER LAUGHTER:
+   - Prioritize acute shock, wide-eyed disbelief, jaw-drops, screams, desk slams, and physical outbursts (empirical 1,000-video research proves shock outperforms mild laughter by 9.4x, and 23.3x in top viral tiers)
+   - Laughter alone without physical shock or comedic subversion underperforms
+   - For reaction streamers (e.g. watching videos/TikToks), capture the full setup-to-punchline reaction terminating right on the punchline or shock beat
+4. MIDPOINT CLIMAX (40-48% MARK):
+   - In 1,000 viral shorts, the peak emotional and visual climax occurs at the 40-48% mark (~11-18s)
+   - The remaining 50-55% must showcase the hilarious aftermath, ragdoll/chat reactions, and loop back seamlessly
+5. STREAMER VIRAL ARCHETYPES:
    - Relationship drama, sibling banter, awkward confessions, and studio accidents beat technical gameplay
-   - Cynical punchlines and video reactions terminating cleanly on the laugh beat passive listening
+   - Cynical punchlines and video reactions terminating cleanly on the punchline beat passive listening
    - High kinetic chaos, physical challenges, and explosive vocal reactions beat quiet menu navigation
-5. DURATION & STORY ARC (35-55s TARGET, MIN 25s, MAX 58s):
-   - Strongly bias toward 35 to 55 seconds (encompassing catalyst setup + peak reaction + punchline resolution)
-   - Minimum duration: 25 seconds (never generate fragmented 15-20s clips without the provoking context)
-   - Hard maximum: 58 seconds (never exceed 58s so the clip remains 100% eligible for YouTube Shorts)
-6. COMPLETE THOUGHTS: Self-contained ideas that make sense alone without missing context
-7. ENTERTAINING & SHAREABLE: Content viewers immediately DM to friends
-8. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping
+6. DURATION & STORY ARC (DYNAMIC CONTEXT-BASED, STRICT MIN 30s, FLEXIBLE 30-58s):
+   - You MUST keep every video ABOVE 30 seconds (strict minimum: 30.0s).
+   - It is NOT necessary or desirable to finish every video at 38 seconds! You can increase or decrease length depending on the video's specific context.
+   - Always check the context of the video and decide the length based on what the viewer needs to fully understand the moment:
+     * Setup & Context (0-8s): Ensure enough lead-in context for the viewer to understand who is speaking, who they are talking to, and what the situation/stakes are. Never start abruptly without context.
+     * Escalation & Midpoint Climax (40-48% mark): The tension, hilarious blunder, or shocking revelation.
+     * Full Resolution & Punchline: Let the streamer complete their full thought, explanation, or reaction. NEVER cut off mid-explanation or mid-sentence.
+   - Adjust duration dynamically between 30 and 58 seconds to capture the complete context.
+   - HARD LIMIT: Never exceed 58.0 seconds (YouTube Shorts 60s limit).
+7. COMPLETE THOUGHTS: Self-contained ideas that make sense alone without missing context
+8. ENTERTAINING & SHAREABLE: Content viewers immediately DM to friends
+9. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping
 
 WHAT A GOOD CLIP FEELS LIKE:
 - A viewer should understand and care without the original title, thumbnail, or previous context
@@ -777,7 +786,7 @@ You receive candidate clips that were picked from different parts of the same vi
 
 Judge each candidate only on its own transcript text:
 1. Hook: do the first one or two sentences make a scrolling viewer stop? Judge them apart from hook_title; lead-in banter, a lone one-word answer, or an opening conjunction ("But the main reason...") that leans on unseen context is a weak hook.
-2. Duration & Pacing Sweet Spot: candidates in the 35-55 second window (min 25s, max 58s) with complete context setup, climax, and dramatic breathing room (85-95 WPM) perform significantly better than incomplete 15s snippets or clips exceeding 58s.
+2. Duration & Pacing Sweet Spot: candidates kept above 30 seconds (min 30s, max 58s) with complete context setup, climax, and dramatic breathing room (85-95 WPM) perform significantly better than incomplete snippets lacking context or clips exceeding 58s.
 3. Standalone: would a viewer understand and care without the rest of the video?
 4. Payoff: does it land a clear point, punchline, lesson, or story beat before it ends?
 5. Specificity, emotion and energy: concrete details, numbers, strong opinions, explosive reactions, emotion, or humor beat vague talk.

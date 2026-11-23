@@ -42,3 +42,7 @@ backend/*.db
 # Sensitive Browser & Auth Data
 backend/browser_data/
 browser_data/
+
+# Temporary video downloads
+*.part
+**/temp_video/

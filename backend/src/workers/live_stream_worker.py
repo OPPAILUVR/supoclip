@@ -108,6 +108,7 @@ async def process_single_streamer(s: Any) -> None:
                     stream_url=stream_url,
                     task_id=task_id,
                     buffer_minutes=s.buffer_minutes,
+                    audio_url=probe.get("audio_url"),
                 )
 
                 await LiveStreamService.record_event(
@@ -153,6 +154,7 @@ async def process_single_streamer(s: Any) -> None:
                     stream_url=stream_url,
                     task_id=task_id,
                     buffer_minutes=s.buffer_minutes,
+                    audio_url=probe.get("audio_url"),
                 )
 
                 # Maintain full 10-minute rolling buffer (10 chunks, 60s each) for rich context

@@ -1,0 +1,176 @@
+{
+  "total_analyzed": 1000,
+  "avg_word_count": 9.2,
+  "median_word_count": 9,
+  "avg_char_count": 49.1,
+  "casing_distribution": {
+    "all_caps_percent": 7.7,
+    "title_case_percent": 3.1,
+    "sentence_case_percent": 89.2
+  },
+  "punctuation": {
+    "question_titles_percent": 1.6,
+    "exclamation_titles_percent": 8.0,
+    "emoji_usage_percent": 27.3
+  },
+  "top_hashtags": [
+    [
+      "#shorts",
+      82
+    ],
+    [
+      "#gta5",
+      26
+    ],
+    [
+      "#ishowspeed",
+      21
+    ],
+    [
+      "#gaming",
+      20
+    ],
+    [
+      "#gta",
+      14
+    ],
+    [
+      "#gtav",
+      13
+    ],
+    [
+      "#gtarp",
+      12
+    ],
+    [
+      "#gta6",
+      10
+    ],
+    [
+      "#xqcow",
+      10
+    ],
+    [
+      "#viral",
+      9
+    ],
+    [
+      "#shortsfeed",
+      9
+    ],
+    [
+      "#xqcowshorts",
+      8
+    ],
+    [
+      "#gtaonline",
+      7
+    ],
+    [
+      "#gtalive",
+      6
+    ],
+    [
+      "#speed",
+      5
+    ]
+  ],
+  "top_viral_triggers": [
+    [
+      "action:speed",
+      230
+    ],
+    [
+      "action:jump",
+      17
+    ],
+    [
+      "rage:rage",
+      15
+    ],
+    [
+      "shock:what",
+      13
+    ],
+    [
+      "police:police",
+      11
+    ],
+    [
+      "police:chase",
+      10
+    ],
+    [
+      "shock:insane",
+      9
+    ],
+    [
+      "shock:shocked",
+      8
+    ],
+    [
+      "police:escape",
+      6
+    ],
+    [
+      "rage:broke",
+      5
+    ],
+    [
+      "action:heist",
+      5
+    ],
+    [
+      "police:cops",
+      5
+    ],
+    [
+      "rage:mad",
+      4
+    ],
+    [
+      "social:secret",
+      4
+    ],
+    [
+      "failure:lost",
+      4
+    ],
+    [
+      "action:sniper",
+      3
+    ],
+    [
+      "failure:fail",
+      2
+    ],
+    [
+      "action:clutch",
+      2
+    ],
+    [
+      "action:stunt",
+      2
+    ],
+    [
+      "shock:impossible",
+      2
+    ]
+  ],
+  "repetition_stats": {
+    "unique_titles_ratio": 0.989,
+    "repeated_title_patterns_count": 11
+  },
+  "category_distribution": {
+    "roleplay_comedy_banter": 5,
+    "xqc_heists_malding": 241,
+    "speed_high_energy_reactions": 250,
+    "kai_social_dynamics": 197,
+    "high_stakes_escapes": 5,
+    "stunts_ragdoll_fails": 3,
+    "plot_twists_betrayals": 7,
+    "unhinged_sandbox_physics": 6,
+    "streamer_comedy_banter": 165,
+    "nopixel_roleplay_chaos": 121
+  }
+}

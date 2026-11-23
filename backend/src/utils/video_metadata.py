@@ -139,54 +139,28 @@ def build_viral_youtube_description(
     elif hook_text:
         teaser = f"🔥 \"{hook_text}\"\n"
 
+    clean_name = re.sub(r"[^a-zA-Z0-9]", "", prof.get("display_name", streamer_name)).lower()
+    streamer_tag = f"#{clean_name}" if clean_name else "#streamer"
+    hashtags = f"#shorts {streamer_tag} #gaming #viral #trending #fyp"
+
     desc = f"""{title}
 
 {teaser}
 🎮 Featured Streamer: {prof['display_name']} ({prof['handle']})
-📺 Watch the original stream: {prof['url']}
-⚡ Clipped live with SupoClip AI
-
-💬 Drop your thoughts in the comments below! Did he go too far or was he 100% right?
-👍 Like and Subscribe for daily live stream highlights, funniest streamer moments, and viral reactions!
+📺 Watch original stream: {prof['url']}
+⚡ Clipped live with SupoClip
 
 ---
-⚖️ COPYRIGHT & FAIR USE DISCLAIMER:
-Copyright Disclaimer Under Section 107 of the Copyright Act 1976, allowance is made for "fair use" for purposes such as criticism, comment, news reporting, teaching, scholarship, and research. Fair use is a use permitted by copyright statute that might otherwise be infringing. Non-profit, educational, or personal use tips the balance in favor of fair use.
+⚖️ Fair Use & Credit: Copyright Disclaimer Under Section 107 of the Copyright Act 1976. For removal: {email}
 
-📩 NOTICE TO CONTENT OWNERS & TAKEDOWN REQUEST:
-If you are the copyright holder or featured creator in this video and wish for this clip to be removed from this channel, please contact me directly at:
-👉 Email: {email}
-We respect all content creators and will remove the video immediately upon request with no dispute.
----
-
-{tags_str}"""
+{hashtags}"""
     return desc.strip()
 
 def get_streamer_tags(streamer_name: str) -> List[str]:
     """
-    Dynamically generates high-CTR SEO tags for ANY current or future streamer.
-    Works collectively across all creators without needing hardcoded entries.
+    Returns empty list to guarantee clean, tag-free uploads and prevent YouTube spam soft-bans.
     """
-    clean_name = re.sub(r"[^a-zA-Z0-9]", "", streamer_name).lower()
-    if not clean_name or clean_name in ["streamer", "unknown", "creator"]:
-        return GLOBAL_CORE_TAGS
-    
-    tags = ["#shorts", f"#{clean_name}", f"#{clean_name}clips", f"#{clean_name}live"]
-    
-    # Check known aliases
-    for key, alias_tags in STREAMER_TAGS.items():
-        if key in clean_name or clean_name in key:
-            for t in alias_tags:
-                if t not in tags:
-                    tags.append(t)
-            break
-            
-    # Add global viral core tags
-    for tag in GLOBAL_CORE_TAGS:
-        if tag not in tags:
-            tags.append(tag)
-            
-    return tags[:15]
+    return []
 
 def strip_and_embed_video_metadata(
     video_path: Path,
@@ -196,27 +170,14 @@ def strip_and_embed_video_metadata(
     description: Optional[str] = None
 ) -> bool:
     """
-    1. Removes all previous camera/stream/encoder metadata (-map_metadata -1).
-    2. Embeds clean, high-performing YouTube SEO metadata:
-       - title: Click-compelling hook title
-       - artist: Streamer name
-       - comment: Targeted viral hashtags
-       - description: SEO video description
+    1. Removes all previous encoder metadata (-map_metadata -1).
+    2. Keeps file headers 100% clean with zero spam tag injections.
     Replaces video_path in-place atomically.
     """
     if not video_path.exists():
         logger.warning("strip_and_embed_video_metadata: Video file not found: %s", video_path)
         return False
 
-    tags = custom_tags or get_streamer_tags(streamer_name)
-    tags_str = " ".join(tags)
-    
-    clean_desc = description or build_viral_youtube_description(
-        title=title,
-        streamer_name=streamer_name,
-        custom_tags=tags
-    )
-    
     temp_out = video_path.with_name(f"meta_clean_{video_path.name}")
     
     cmd = [
@@ -226,8 +187,6 @@ def strip_and_embed_video_metadata(
         "-c", "copy",
         "-metadata", f"title={title}",
         "-metadata", f"artist={streamer_name}",
-        "-metadata", f"comment={tags_str}",
-        "-metadata", f"description={clean_desc}",
         "-metadata:s:v:0", "handler_name=SupoClip Engine",
         str(temp_out)
     ]

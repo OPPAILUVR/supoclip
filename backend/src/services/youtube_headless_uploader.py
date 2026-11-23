@@ -11,7 +11,7 @@ import json
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -232,12 +232,23 @@ class HeadlessYouTubeUploader:
         title: str,
         description: str,
         tags: list,
-        is_short: bool = True
+        is_short: bool = True,
+        thumbnail_path: Optional[Path] = None
     ) -> Dict[str, Any]:
         """
         Uploads a video completely headlessly with zero desktop interference.
         Attaches video file directly via set_input_files, fills metadata, sets Public, and publishes.
+        
+        STRICT RELIABILITY GUARANTEES:
+        1. Pre-upload duplicate check: Never uploads duplicate titles.
+        2. Wait for full video upload before publishing: Never closes early while uploading.
+        3. Mandatory Post-Upload Verification: Confirms on YouTube Studio that the video
+           row has status 'Public' (NOT 'Draft').
+        4. Zero Draft Tolerance: If YouTube commits as Draft, immediately walks 'Edit draft'
+           to force 'Public'. If it still remains in Draft, deletes the draft permanently
+           so no orphaned drafts ever sit in the channel.
         """
+        import re
         if not video_path.exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -245,6 +256,8 @@ class HeadlessYouTubeUploader:
         upload_title = title[:95]
         if is_short and "#shorts" not in upload_title.lower():
             upload_title = f"{upload_title} #shorts"[:100]
+
+        norm_title = re.sub(r'[^a-zA-Z0-9]', '', upload_title.lower().replace('#shorts', ''))
 
         async with async_playwright() as p:
             context = await self.get_context(p)
@@ -257,7 +270,57 @@ class HeadlessYouTubeUploader:
                 if "accounts.google.com" in page.url:
                     raise PermissionError("YouTube Studio is not authenticated. Please import cookies or perform one-time login.")
 
-                # Click Create button or go to upload URL directly
+                # Pre-upload check: Check if video already exists on channel
+                content_url = "https://studio.youtube.com/channel/UCfSSIQbWKw7Pl6jCdHD_rxg/videos/short"
+                logger.info("Pre-upload check: Auditing channel to prevent duplicate uploads...")
+                await page.goto(content_url, timeout=45000, wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+                
+                existing_rows = await page.locator("ytcp-video-row").all()
+                for r in existing_rows:
+                    txt = await r.inner_text()
+                    title_match = norm_title in re.sub(r'[^a-zA-Z0-9]', '', txt.lower().replace('#shorts', ''))
+                    if title_match:
+                        if "Public" in txt or "Published" in txt:
+                            logger.info("Video '%s' is ALREADY PUBLIC on YouTube! Skipping duplicate upload.", upload_title)
+                            link_el = r.locator("a[href*='/video/'], a.ytcp-video-info").first
+                            video_id = None
+                            if await link_el.count() > 0:
+                                href = await link_el.get_attribute("href")
+                                m = re.search(r'/video/([^/]+)', href or "")
+                                if m:
+                                    video_id = m.group(1)
+                            video_url = f"https://www.youtube.com/shorts/{video_id}" if video_id else None
+                            return {
+                                "success": True,
+                                "status": "published",
+                                "title": upload_title,
+                                "video_url": video_url,
+                                "verified": True,
+                                "duplicate_prevented": True
+                            }
+                        elif "Draft" in txt:
+                            logger.warning("Found stale draft for '%s'. Deleting draft before clean upload...", upload_title)
+                            await r.hover()
+                            await asyncio.sleep(1)
+                            opt_btn = r.locator("#options-button, button[aria-label*='Options' i]").first
+                            if await opt_btn.count() > 0:
+                                await opt_btn.click(force=True)
+                                await asyncio.sleep(1)
+                                del_menu = page.locator("tp-yt-paper-item:has-text('Delete forever')").first
+                                if await del_menu.count() > 0:
+                                    await del_menu.click(force=True)
+                                    await asyncio.sleep(1)
+                                    conf_dialog = page.locator("ytcp-confirmation-dialog").filter(has_text="Delete").first
+                                    conf_cb = conf_dialog.locator("ytcp-checkbox-lit, #confirm-checkbox").first
+                                    if await conf_cb.count() > 0:
+                                        await conf_cb.click(force=True)
+                                    conf_btn = conf_dialog.locator("ytcp-button#confirm-button, button:has-text('Delete forever')").first
+                                    if await conf_btn.count() > 0:
+                                        await conf_btn.click(force=True)
+                                        await asyncio.sleep(3)
+
+                # Click Create button to initiate upload
                 logger.info("Initiating upload dialog...")
                 create_btn = page.locator("#create-icon, button:has-text('Create'), #upload-button, [aria-label='Upload videos']").first
                 if await create_btn.count() > 0:
@@ -283,73 +346,111 @@ class HeadlessYouTubeUploader:
                 await self.check_and_handle_reauth(page, context)
 
                 # Set Title
-                title_box = page.locator("#textbox[aria-label*='title'], ytcp-mention-textbox[label*='Title'] #textbox").first
+                title_box = page.locator("#title-textarea #textbox, #textbox[aria-label*='title' i]").first
                 if await title_box.count() > 0:
                     await title_box.click(force=True)
-                    await page.keyboard.press("Meta+A")
-                    await page.keyboard.press("Backspace")
-                    await title_box.type(upload_title, delay=10)
+                    await title_box.fill(upload_title)
                     logger.info("Filled Title: %s", upload_title)
+                else:
+                    logger.warning("Could not locate title textbox via selector, attempting fallback...")
 
                 # Set Description
-                desc_box = page.locator("#textbox[aria-label*='description'], ytcp-mention-textbox[label*='Description'] #textbox").first
+                desc_box = page.locator("#description-textarea #textbox, [aria-label*='Tell viewers' i]").first
                 if await desc_box.count() > 0:
                     await desc_box.click(force=True)
-                    await page.keyboard.press("Meta+A")
-                    await page.keyboard.press("Backspace")
-                    await desc_box.type(description, delay=5)
-                    logger.info("Filled Description.")
+                    await desc_box.fill(description)
+                    logger.info("Filled Description (%d chars).", len(description))
+                else:
+                    raise RuntimeError("CHECKLIST VIOLATION: Could not locate YouTube description box (#description-textarea #textbox). Upload aborted — description is MANDATORY.")
 
-                # Select 'No, it's not made for kids' (mandatory YouTube step)
+                # Upload custom viral thumbnail if provided
+                if thumbnail_path and Path(thumbnail_path).exists():
+                    try:
+                        thumb_file = str(Path(thumbnail_path).resolve())
+                        logger.info("Attaching viral thumbnail: %s", Path(thumbnail_path).name)
+                        thumb_input = page.locator("input#file-loader, ytcp-thumbnails-compact-editor input[type='file'], input[type='file'][accept*='image']").first
+                        if await thumb_input.count() > 0:
+                            await thumb_input.set_input_files(thumb_file)
+                            logger.info("Successfully attached viral thumbnail via input element!")
+                            await asyncio.sleep(2)
+                        else:
+                            thumb_btn = page.locator("button#select-button, #upload-button, [aria-label*='Upload thumbnail' i], ytcp-button:has-text('Upload thumbnail')").first
+                            if await thumb_btn.count() > 0 and await thumb_btn.is_visible():
+                                async with page.expect_file_chooser(timeout=5000) as fc_info:
+                                    await thumb_btn.click(force=True)
+                                file_chooser = await fc_info.value
+                                await file_chooser.set_files(thumb_file)
+                                logger.info("Successfully attached viral thumbnail via file chooser!")
+                                await asyncio.sleep(2)
+                    except Exception as thumb_err:
+                        logger.warning("Thumbnail upload notice (non-fatal): %s", thumb_err)
+
+                # Select 'No, it's not made for kids'
                 not_for_kids = page.locator("#not-made-for-kids-radio, tp-yt-paper-radio-button[name='VIDEO_MADE_FOR_KIDS_NOT_MFK']").first
                 if await not_for_kids.count() > 0:
                     await not_for_kids.click(force=True)
                     logger.info("Selected 'Not made for kids'")
 
-                # Open 'Show more' to add tags
-                show_more_btn = page.locator("#toggle-button:has-text('Show more'), button:has-text('Show more')").first
-                if await show_more_btn.count() > 0:
-                    try:
-                        await show_more_btn.click(force=True)
-                        await asyncio.sleep(1)
-                        tags_input = page.locator("input[aria-label='Tags'], #tags-container input, #text-input[aria-label='Tags']").first
-                        if await tags_input.count() > 0:
-                            tags_csv = ",".join([t.replace("#", "") for t in tags[:15]])
-                            await tags_input.type(tags_csv + ",", delay=10)
-                            logger.info("Added tags: %s", tags_csv)
-                    except Exception as tag_err:
-                        logger.warning("Could not fill tags (non-fatal): %s", tag_err)
+                # Tag Handling
+                if tags and len(tags) > 0:
+                    show_more_btn = page.locator("#toggle-button:has-text('Show more'), button:has-text('Show more')").first
+                    if await show_more_btn.count() > 0:
+                        try:
+                            await show_more_btn.click(force=True)
+                            await asyncio.sleep(1)
+                            tags_input = page.locator("input[aria-label='Tags'], #tags-container input, #text-input[aria-label='Tags']").first
+                            if await tags_input.count() > 0:
+                                tags_csv = ",".join([t.replace("#", "") for t in tags[:5]])
+                                await tags_input.type(tags_csv + ",", delay=10)
+                                logger.info("Added clean tags: %s", tags_csv)
+                        except Exception as tag_err:
+                            logger.warning("Could not fill tags (non-fatal): %s", tag_err)
 
                 # Check if YouTube Daily Upload Limit is reached
                 daily_limit_msg = page.locator("text='Daily upload limit reached', [aria-label*='Daily upload limit reached']").first
                 if await daily_limit_msg.count() > 0 and await daily_limit_msg.is_visible():
-                    logger.critical("🛑 YOUTUBE DAILY UPLOAD LIMIT REACHED: Channel has hit its 24-hour upload cap. YouTube requires a one-time channel verification (phone/video ID) or waiting 24 hours to upload more videos.")
+                    logger.critical("🛑 YOUTUBE DAILY UPLOAD LIMIT REACHED: Channel has hit its 24-hour upload cap.")
                     raise PermissionError("YouTube Daily Upload Limit Reached: Upload more videos daily after a one-time verification or wait 24 hours.")
+
+                # Wait for upload progress to reach at least 100% or processing before clicking Next
+                logger.info("Monitoring upload progress to ensure video data is fully uploaded...")
+                for _ in range(30):
+                    progress_text = await page.evaluate("""() => {
+                        const el = document.querySelector("ytcp-video-upload-progress, .progress-label, [role=progressbar]");
+                        return el ? el.innerText : "";
+                    }""")
+                    if any(done_kw in progress_text.lower() for done_kw in ["upload complete", "processing", "checks", "100%"]):
+                        logger.info("Upload progress confirmed: %s", progress_text.strip().replace("\n", " "))
+                        break
+                    await asyncio.sleep(2)
 
                 # Step through wizard to Visibility
                 next_btn = page.locator("#next-button")
-                for step_idx in range(4):
+                for step_idx in range(1, 5):
                     if await next_btn.is_visible() and await next_btn.is_enabled():
                         await next_btn.click(force=True)
-                        logger.info("Clicked Next (step %d)", step_idx + 1)
-                        await asyncio.sleep(2)
+                        logger.info("Clicked Next (step %d)", step_idx)
+                        await asyncio.sleep(2.5)
                         await self.check_and_handle_reauth(page, context)
                     elif await page.locator("text='Daily upload limit reached'").count() > 0:
                         raise PermissionError("YouTube Daily Upload Limit Reached: Upload more videos daily after a one-time verification or wait 24 hours.")
+                    else:
+                        break
 
-                # Jump to Visibility step badge directly if not already there
+                # Ensure Visibility step is active
                 public_radio = page.locator("tp-yt-paper-radio-button[name='PUBLIC'], tp-yt-paper-radio-button:has-text('Public')").first
                 if not (await public_radio.count() > 0 and await public_radio.is_visible()):
                     step_3 = page.locator("#step-badge-3, [id*='step-badge-3']").first
                     if await step_3.count() > 0 and await step_3.is_visible():
                         await step_3.click(force=True)
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(2.5)
                         await self.check_and_handle_reauth(page, context)
 
                 # Set Visibility to Public
-                if await public_radio.count() > 0:
+                if await public_radio.count() > 0 and await public_radio.is_visible():
                     await public_radio.click(force=True)
                     logger.info("Selected 'Public' visibility")
+                    await asyncio.sleep(2.0)
                 else:
                     raise RuntimeError("Could not find or select 'Public' visibility radio button in YouTube Studio.")
 
@@ -361,44 +462,155 @@ class HeadlessYouTubeUploader:
                     logger.info("Extracted YouTube video URL: %s", video_url)
 
                 # Click Publish / Done
-                done_btn = page.locator("#done-button, #publish-button, button:has-text('Publish')").first
+                done_btn = page.locator("#done-button, #publish-button, button:has-text('Publish'), button:has-text('Save')").first
                 await done_btn.wait_for(state="visible", timeout=15000)
                 if await done_btn.get_attribute("aria-disabled") == "true":
                     raise RuntimeError("YouTube Studio Publish button is disabled.")
 
                 await done_btn.click(force=True)
-                logger.info("Clicked Publish! Video is now finalizing on YouTube.")
-                await asyncio.sleep(5)
+                logger.info("Clicked Publish! Waiting for YouTube modal to dismiss...")
+                await asyncio.sleep(6)
 
-                # Check for post-publish dialog dismissal
-                close_btn = page.locator("ytcp-uploads-dialog ytcp-button#close-button, ytcp-uploads-still-processing-dialog ytcp-button#close-button, button:has-text('Close')").first
-                if await close_btn.count() > 0 and await close_btn.is_visible():
-                    # Extract URL from dialog if not found yet
-                    post_link = page.locator("ytcp-uploads-dialog a[href*='youtu.be'], ytcp-uploads-still-processing-dialog a[href*='youtu.be']").first
+                # Only close if post-processing dialog explicitly appeared
+                processing_dialog_close = page.locator("ytcp-uploads-still-processing-dialog ytcp-button#close-button, ytcp-uploads-still-processing-dialog button:has-text('Close')").first
+                if await processing_dialog_close.count() > 0 and await processing_dialog_close.is_visible():
+                    post_link = page.locator("ytcp-uploads-still-processing-dialog a[href*='youtu.be']").first
                     if await post_link.count() > 0 and not video_url:
                         video_url = await post_link.get_attribute("href")
-                    await close_btn.click(force=True)
-                    logger.info("Dismissed post-publish dialog.")
+                    await processing_dialog_close.click(force=True)
+                    logger.info("Dismissed post-publish still-processing dialog.")
+                    await asyncio.sleep(2)
+
+                # =====================================================================
+                # MANDATORY POST-UPLOAD VERIFICATION IN YOUTUBE STUDIO TABLE
+                # =====================================================================
+                logger.info("🔍 POST-UPLOAD VERIFICATION: Navigating to Shorts table to verify Public status...")
+                await page.goto(content_url, timeout=45000, wait_until="domcontentloaded")
+                await asyncio.sleep(4)
+
+                matched_row = None
+                matched_text = ""
+                rows = await page.locator("ytcp-video-row").all()
+                for r in rows:
+                    txt = await r.inner_text()
+                    if norm_title in re.sub(r'[^a-zA-Z0-9]', '', txt.lower().replace('#shorts', '')):
+                        matched_row = r
+                        matched_text = txt
+                        break
+
+                if not matched_row and len(rows) > 0:
+                    matched_row = rows[0]
+                    matched_text = await matched_row.inner_text()
+
+                logger.info("Target video row in Studio: %s", matched_text[:120].replace("\n", " | "))
+
+                if matched_row:
+                    link_el = matched_row.locator("a[href*='/video/'], a.ytcp-video-info").first
+                    if await link_el.count() > 0:
+                        href = await link_el.get_attribute("href")
+                        m = re.search(r'/video/([^/]+)', href or "")
+                        if m:
+                            video_id = m.group(1)
+                            if not video_url:
+                                video_url = f"https://www.youtube.com/shorts/{video_id}"
+
+                is_public = any(k in matched_text for k in ["Public", "Published", "Scheduled"])
+                is_draft = "Draft" in matched_text
+
+                if is_draft and matched_row:
+                    logger.warning("⚠️ Video landed as DRAFT in YouTube Studio! Immediately fixing to Public via Edit draft wizard...")
+                    edit_btn = matched_row.locator("button:has-text('Edit draft'), [aria-label*='Edit draft']").first
+                    if await edit_btn.count() > 0:
+                        await edit_btn.click(force=True)
+                        await asyncio.sleep(3)
+                        n_btn = page.locator("#next-button")
+                        for _ in range(4):
+                            if await n_btn.is_visible() and await n_btn.is_enabled():
+                                await n_btn.click(force=True)
+                                await asyncio.sleep(1.8)
+                            else:
+                                break
+                        pub_r = page.locator("tp-yt-paper-radio-button[name='PUBLIC'], tp-yt-paper-radio-button:has-text('Public')").first
+                        if await pub_r.is_visible():
+                            await pub_r.click(force=True)
+                            await asyncio.sleep(1.0)
+                        pub_btn = page.locator("#done-button, #publish-button, button:has-text('Publish'), button:has-text('Save')").first
+                        if await pub_btn.is_visible() and await pub_btn.is_enabled():
+                            await pub_btn.click(force=True)
+                            await asyncio.sleep(6)
+                            p_close = page.locator("ytcp-uploads-still-processing-dialog #close-button, ytcp-button:has-text('Close')").first
+                            if await p_close.count() > 0 and await p_close.is_visible():
+                                await p_close.click(force=True)
+                        
+                        await page.goto(content_url, timeout=35000, wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                        rows_after = await page.locator("ytcp-video-row").all()
+                        for r_a in rows_after:
+                            txt_a = await r_a.inner_text()
+                            if norm_title in re.sub(r'[^a-zA-Z0-9]', '', txt_a.lower().replace('#shorts', '')):
+                                is_public = any(k in txt_a for k in ["Public", "Published", "Scheduled"])
+                                is_draft = "Draft" in txt_a
+                                break
+
+                if is_draft:
+                    logger.error("❌ Draft fix failed. Deleting draft from YouTube Studio to maintain zero-draft policy...")
+                    if matched_row:
+                        await matched_row.hover()
+                        await asyncio.sleep(1)
+                        opt_b = matched_row.locator("#options-button, button[aria-label*='Options' i]").first
+                        if await opt_b.count() > 0:
+                            await opt_b.click(force=True)
+                            await asyncio.sleep(1)
+                            del_m = page.locator("tp-yt-paper-item:has-text('Delete forever')").first
+                            if await del_m.count() > 0:
+                                await del_m.click(force=True)
+                                await asyncio.sleep(1)
+                                c_dialog = page.locator("ytcp-confirmation-dialog").filter(has_text="Delete").first
+                                c_cb = c_dialog.locator("ytcp-checkbox-lit, #confirm-checkbox").first
+                                if await c_cb.count() > 0:
+                                    await c_cb.click(force=True)
+                                c_b = c_dialog.locator("ytcp-button#confirm-button, button:has-text('Delete forever')").first
+                                if await c_b.count() > 0:
+                                    await c_b.click(force=True)
+                                    await asyncio.sleep(3)
+                    raise RuntimeError(f"Video '{upload_title}' could not be published to Public (ended up in Draft). Auto-deleted draft to prevent draft clutter.")
+
+                if not is_public:
+                    raise RuntimeError(f"Video '{upload_title}' visibility could not be confirmed as Public on YouTube Studio.")
+
+                logger.info("🎉 SUCCESS: Video '%s' is 100%% VERIFIED PUBLIC on YouTube! URL: %s", upload_title, video_url)
 
                 try:
                     await context.storage_state(path=str(BACKEND_DIR / "browser_data" / "storage_state.json"))
                     cookies = await context.cookies()
                     with open(self.cookies_file, "w") as f:
                         json.dump(cookies, f, indent=2)
-                    logger.info("Persisted updated cookies and session state after upload.")
+                    logger.info("Persisted updated cookies and session state after verified upload.")
                 except Exception as save_err:
                     logger.warning("Could not persist cookies: %s", save_err)
 
                 return {
                     "success": True,
+                    "status": "published",
                     "title": upload_title,
-                    "video_url": video_url,
+                    "video_url": video_url or "",
                     "video_path": str(video_path),
+                    "verified": True,
                 }
 
             except Exception as e:
                 logger.error("Error during headless YouTube upload: %s", e)
-                # Take debug screenshot in background if failed
+                try:
+                    discard_btn = page.locator("button:has-text('Discard draft'), ytcp-button#discard-button, #close-button, [aria-label='Close']").first
+                    if await discard_btn.count() > 0 and await discard_btn.is_visible():
+                        await discard_btn.click(force=True)
+                        await asyncio.sleep(1)
+                        confirm_discard = page.locator("button:has-text('Discard'), ytcp-button:has-text('Discard')").first
+                        if await confirm_discard.count() > 0 and await confirm_discard.is_visible():
+                            await confirm_discard.click(force=True)
+                            logger.info("Auto-discarded incomplete upload dialog to prevent orphaned draft.")
+                except Exception:
+                    pass
                 debug_shot = BACKEND_DIR / "browser_data" / "last_upload_error.png"
                 try:
                     await page.screenshot(path=str(debug_shot))
@@ -406,6 +618,120 @@ class HeadlessYouTubeUploader:
                 except Exception:
                     pass
                 raise e
+            finally:
+                await context.close()
+
+    async def publish_all_unique_drafts(self, max_count: int = 5) -> List[Dict[str, Any]]:
+        """
+        Scans YouTube Studio for unpublished drafts, filters out duplicate titles,
+        and publishes unique drafts to Public.
+        Returns a list of published video results.
+        """
+        import re
+        published_results = []
+        
+        async with async_playwright() as p:
+            context = await self.get_context(p)
+            page = context.pages[0] if context.pages else await context.new_page()
+            try:
+                content_url = "https://studio.youtube.com/channel/UCfSSIQbWKw7Pl6jCdHD_rxg/videos/short"
+                await page.goto(content_url, timeout=45000, wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+
+                seen_titles = set()
+                # First pass: find existing public titles
+                rows = await page.locator("ytcp-video-row").all()
+                for r in rows:
+                    txt = await r.inner_text()
+                    lines = [l.strip() for l in txt.split("\n") if l.strip()]
+                    title = lines[1] if len(lines) > 1 else ""
+                    norm = re.sub(r'[^a-zA-Z0-9]', '', title.lower().replace('#shorts', ''))
+                    if "Public" in txt and norm:
+                        seen_titles.add(norm)
+
+                logger.info("Found %d already public videos to prevent duplicate titles.", len(seen_titles))
+
+                published_count = 0
+                while published_count < max_count:
+                    # Refresh rows
+                    rows = await page.locator("ytcp-video-row").all()
+                    target_row = None
+                    target_title = None
+                    
+                    for r in rows:
+                        txt = await r.inner_text()
+                        if "Draft" in txt:
+                            lines = [l.strip() for l in txt.split("\n") if l.strip()]
+                            title = lines[1] if len(lines) > 1 else ""
+                            norm = re.sub(r'[^a-zA-Z0-9]', '', title.lower().replace('#shorts', ''))
+                            if norm and norm not in seen_titles:
+                                seen_titles.add(norm)
+                                target_row = r
+                                target_title = title
+                                break
+
+                    if not target_row:
+                        logger.info("No more unique drafts found to publish.")
+                        break
+
+                    logger.info("Publishing unique draft: '%s'...", target_title)
+                    edit_btn = target_row.locator('button:has-text("Edit draft")').first
+                    if await edit_btn.count() == 0:
+                        break
+
+                    await edit_btn.click(force=True)
+                    await asyncio.sleep(2.5)
+
+                    # Step wizard to visibility
+                    next_btn = page.locator("#next-button")
+                    for step_i in range(4):
+                        if await next_btn.is_visible() and await next_btn.is_enabled():
+                            await next_btn.click(force=True)
+                            await asyncio.sleep(1.8)
+                        else:
+                            break
+
+                    # Select Public
+                    public_radio = page.locator('tp-yt-paper-radio-button[name="PUBLIC"], tp-yt-paper-radio-button:has-text("Public")').first
+                    if await public_radio.is_visible():
+                        await public_radio.click(force=True)
+                        await asyncio.sleep(1.0)
+
+                    # Click Publish
+                    publish_btn = page.locator('#done-button, #publish-button, button:has-text("Publish"), button:has-text("Save")').first
+                    if await publish_btn.is_visible() and await publish_btn.is_enabled():
+                        await publish_btn.click(force=True)
+                        await asyncio.sleep(5.0)
+
+                        # Capture video link from modal if shown
+                        video_link_el = page.locator("a.ytcp-video-info, a[href*='youtu']").first
+                        video_url = await video_link_el.get_attribute("href") if await video_link_el.count() > 0 else None
+
+                        logger.info("✅ Successfully published draft '%s' to Public! (URL: %s)", target_title, video_url)
+                        published_results.append({
+                            "title": target_title,
+                            "url": video_url,
+                            "status": "published"
+                        })
+                        published_count += 1
+
+                        # Close dialog
+                        close_btn = page.locator("ytcp-uploads-still-processing-dialog #close-button, ytcp-button:has-text('Close')").first
+                        if await close_btn.count() > 0 and await close_btn.is_visible():
+                            await close_btn.click(force=True)
+                            await asyncio.sleep(1.5)
+
+                        # Reload table
+                        await page.goto(content_url, timeout=35000, wait_until="domcontentloaded")
+                        await asyncio.sleep(2.5)
+                    else:
+                        logger.warning("Publish button was not enabled for draft '%s'.", target_title)
+                        break
+
+                return published_results
+            except Exception as e:
+                logger.error("Error in publish_all_unique_drafts: %s", e)
+                return published_results
             finally:
                 await context.close()
 

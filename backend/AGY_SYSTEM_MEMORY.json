@@ -1,0 +1,92 @@
+{
+  "system_version": "2.0.0",
+  "project_name": "SupoClip Automated Viral Engine",
+  "last_updated": "2026-11-16T16:29:00+05:30",
+  "immutable_directives": {
+    "model_usage": {
+      "policy": "STRICT_LOCAL_MODELS_ONLY",
+      "gemini_api_tokens": 0,
+      "description": "All transcription, hook analysis, and video processing must run locally unless explicitly instructed otherwise."
+    },
+    "visual_standards": {
+      "crop_format": "AMBIENT_BLURRED_CANVAS",
+      "crop_margins": {
+        "left_crop_percent": 6.0,
+        "right_crop_percent": 6.0,
+        "top_crop_percent": 1.0,
+        "bottom_crop_percent": 1.0
+      },
+      "caption_style": {
+        "font_family": "Impact",
+        "font_size": 22,
+        "primary_color": "#FFFFFF",
+        "highlight_active_word_color": "#FFFF00",
+        "ass_active_hex": "&H0000FFFF&",
+        "entrance_animation": "spring_bounce_pop",
+        "vertical_position_ratio": 0.80,
+        "safe_zone": "above_youtube_shorts_overlays"
+      },
+      "target_duration_seconds": 28.0,
+      "max_duration_seconds": 38.0
+    },
+    "thumbnail_generation": {
+      "mandatory": true,
+      "aspect_ratios": ["9:16", "16:9"],
+      "typography": "Impact_Bold",
+      "color_palette": "Electric_Yellow_and_White",
+      "pill_badge": "Red_Background_White_Text",
+      "climax_frame_scoring": "laplacian_variance_plus_saturation"
+    },
+    "youtube_distribution": {
+      "publishing_cadence": {
+        "tier_1_instant_95_plus": {
+          "score_threshold": 95,
+          "cooldown_seconds_min": 180,
+          "cooldown_seconds_max": 240,
+          "description": "Clips with score >= 95 MUST be uploaded INSTANTLY with an exact 3 to 4 minute (180-240s) gap between consecutive uploads."
+        },
+        "tier_2_regular_below_95": {
+          "score_threshold_below": 95,
+          "cooldown_minutes_min": 50,
+          "cooldown_minutes_max": 100,
+          "cooldown_seconds_min": 3000,
+          "cooldown_seconds_max": 6000,
+          "description": "Clips with score < 95 MUST be uploaded RANDOMLY with a 50 to 100 minute (3000-6000s) gap."
+        }
+      },
+      "visibility": "PUBLIC",
+      "draft_policy": "NO_ABANDONED_DRAFTS",
+      "anti_duplication": {
+        "enabled": true,
+        "title_similarity_threshold": 0.70,
+        "action": "skip_duplicates_and_generate_unique_titles"
+      },
+      "description_and_tags": {
+        "zero_tag_stuffing": true,
+        "max_tags": 8,
+        "tag_dump_prohibited": true
+      }
+    },
+    "architecture_pipeline": {
+      "worker_1_stream_capture": {
+        "module": "src.workers.live_stream_worker",
+        "responsibility": "24/7 stream capture & rolling 10-chunk buffer management. Never blocked by rendering or uploading."
+      },
+      "worker_2_ai_engine": {
+        "module": "src.workers.ai_worker / LiveStreamService",
+        "responsibility": "Audio transcription, hook scoring, vertical 9:16 render, dynamic subtitles, thumbnail creation."
+      },
+      "worker_3_youtube_distribution": {
+        "module": "src.workers.youtube_upload_worker",
+        "responsibility": "Dedicated YouTube uploader & draft publisher. Always free to publish independently with strict 3-4 min spacing."
+      }
+    },
+    "credential_protection": {
+      "protected_paths": [
+        "backend/browser_data/youtube_cookies.json",
+        "backend/browser_data/youtube_profile"
+      ],
+      "policy": "NEVER_DELETE_OR_OVERWRITE_WITHOUT_USER_CONSENT"
+    }
+  }
+}

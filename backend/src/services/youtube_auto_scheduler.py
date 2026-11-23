@@ -311,10 +311,11 @@ async def mark_clip_upload_failed(engine, clip_id, error_details):
         )
     logger.warning("Marked clip %s as failed upload at %s: %s", clip_id, now_iso, meta_update["upload_error"])
 
-async def trigger_headless_upload(video_path: Path, title: str, description: str, tags: list):
+async def trigger_headless_upload(video_path: Path, title: str, description: str, tags: list, streamer_name: str = ""):
     """
     Executes a 100% headless, background YouTube Studio upload via Playwright.
     Zero popups, zero screen switching, and zero interference with the user's desktop.
+    Automatically generates and attaches a high-CTR viral thumbnail for every Short.
     """
     logger.info("Executing 100%% headless background upload for: %s", title)
     
@@ -329,6 +330,20 @@ async def trigger_headless_upload(video_path: Path, title: str, description: str
     }
     manifest_path = video_path.with_suffix(".youtube_upload.json")
     
+    # Step 1.5: Automatically generate high-CTR viral thumbnail for every short
+    thumbnail_path = None
+    try:
+        from src.services.thumbnail_generator import generate_viral_thumbnail
+        thumbnail_path = generate_viral_thumbnail(
+            video_path=video_path,
+            hook_title=title,
+            streamer_name=streamer_name
+        )
+        manifest["thumbnail_file"] = str(thumbnail_path)
+        logger.info("Generated high-CTR viral thumbnail for upload: %s", thumbnail_path.name)
+    except Exception as thumb_err:
+        logger.warning("Could not generate viral thumbnail (non-fatal): %s", thumb_err)
+
     uploader = HeadlessYouTubeUploader(headless=True)
     auth_status = await uploader.check_auth_status()
     
@@ -344,12 +359,12 @@ async def trigger_headless_upload(video_path: Path, title: str, description: str
         return manifest
 
     try:
-        res = await uploader.upload_video(video_path, title, description, tags, is_short=True)
+        res = await uploader.upload_video(video_path, title, description, tags, is_short=True, thumbnail_path=thumbnail_path)
         manifest["status"] = "published"
         manifest["upload_result"] = res
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
-        logger.info("Successfully published video headlessly! Result: %s", res)
+        logger.info("Successfully published video headlessly with viral thumbnail! Result: %s", res)
         return manifest
     except Exception as e:
         logger.error("Headless upload failed: %s", e)
@@ -606,8 +621,8 @@ async def process_single_upload_cycle(engine, clip=None, retry_count: int = 0):
         description=description
     )
 
-    # Step 2: Trigger Headless Background upload
-    manifest = await trigger_headless_upload(clip_path, title, description, tags)
+    # Step 2: Trigger Headless Background upload with auto-generated viral thumbnail
+    manifest = await trigger_headless_upload(clip_path, title, description, tags, streamer_name=streamer)
 
     # Step 3: Record upload attempt in DB and arm 5-minute verification watcher
     await record_upload_attempt(engine, clip["id"], title, streamer, manifest)
