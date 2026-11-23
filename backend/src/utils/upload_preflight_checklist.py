@@ -25,8 +25,8 @@ from typing import Dict, Any, List, Optional, Tuple
 logger = logging.getLogger("PreflightChecklist")
 
 # ─── Section 6: Approved streamers (ONLY these are allowed) ───
-APPROVED_STREAMERS = {"ishowspeed", "asmong", "kai", "botez"}
-BLOCKED_STREAMERS = {"xqc", "jynxzi", "adinross"}
+APPROVED_STREAMERS = {"ishowspeed", "asmong", "kai"}
+BLOCKED_STREAMERS = {"botez", "xqc", "jynxzi", "adinross"}
 
 
 class CheckResult:
