@@ -104,11 +104,11 @@
       "facial_reaction_weight": 0.2
     }
   },
-  "last_system_audit": "2026-11-23T16:54:44.852924+00:00",
+  "last_system_audit": "2026-11-23T18:02:24.713963+00:00",
   "last_audit_status": "PASS",
   "audit_summary": {
     "workers": true,
-    "storage_gb": 0.0,
+    "storage_gb": 0.05,
     "drafts_in_studio": 0
   }
 }

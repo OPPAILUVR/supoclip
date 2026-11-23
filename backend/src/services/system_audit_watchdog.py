@@ -123,8 +123,8 @@ class SystemAuditWatchdog:
                 context = await uploader.get_context(p)
                 page = context.pages[0] if context.pages else await context.new_page()
                 studio_url = "https://studio.youtube.com/channel/UCfSSIQbWKw7Pl6jCdHD_rxg/videos/short"
-                await page.goto(studio_url, timeout=45000, wait_until="networkidle")
-                await page.wait_for_timeout(3000)
+                await page.goto(studio_url, timeout=45000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(3500)
 
                 rows = await page.locator("ytcp-video-row").all()
                 results["videos_inspected"] = len(rows)
