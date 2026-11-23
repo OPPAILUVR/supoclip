@@ -13,7 +13,7 @@ import random
 import asyncio
 import logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -57,12 +57,67 @@ class YouTubeUploadWorker:
         self.uploader = HeadlessYouTubeUploader(headless=True)
         self.last_upload_time = 0.0
         self.last_audit_time = 0.0
+        self.last_uploaded_streamer: Optional[str] = None
         self.daily_limit_active_until = 0.0
         self.current_instant_cooldown = random.randint(INSTANT_MIN_COOLDOWN, INSTANT_MAX_COOLDOWN)
         self.next_regular_scheduled_time = time.time() + random.randint(REGULAR_MIN_COOLDOWN, REGULAR_MAX_COOLDOWN)
 
+    async def get_streamer_upload_counts_24h(self) -> Dict[str, int]:
+        """Calculates uploads per streamer in the last 24 hours."""
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        counts: Dict[str, int] = {}
+        async with self.engine.connect() as conn:
+            res = await conn.execute(
+                text("""
+                    SELECT workflow_meta->>'streamer' as streamer, COUNT(*)
+                    FROM generated_clips
+                    WHERE workflow_meta->>'uploaded' = 'true'
+                      AND created_at >= :since
+                    GROUP BY workflow_meta->>'streamer';
+                """),
+                {"since": since}
+            )
+            for row in res.fetchall():
+                if row[0]:
+                    counts[row[0].lower()] = int(row[1])
+        return counts
+
+    async def get_active_streamers_24h(self) -> List[str]:
+        """Finds distinct streamers who produced candidate clips in the last 24 hours."""
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        async with self.engine.connect() as conn:
+            res = await conn.execute(
+                text("""
+                    SELECT DISTINCT LOWER(workflow_meta->>'streamer')
+                    FROM generated_clips
+                    WHERE created_at >= :since
+                      AND workflow_meta->>'streamer' IS NOT NULL;
+                """),
+                {"since": since}
+            )
+            return [r[0] for r in res.fetchall() if r[0]]
+
+    @staticmethod
+    def is_prime_time_window() -> bool:
+        """Checks if current local hour falls in one of the 4 Global Peak Viewing Windows."""
+        hour = datetime.now().hour
+        # Window 1: 9-11 AM, Window 2: 13-16 (1-4 PM), Window 3: 18-21 (6-9 PM), Window 4: 21-23 (9-11 PM)
+        return (9 <= hour < 11) or (13 <= hour < 16) or (18 <= hour < 21) or (21 <= hour <= 23)
+
     async def get_next_95_plus_clip(self) -> Optional[Dict[str, Any]]:
-        """Queries for the highest-scoring unuploaded clip with virality >= 95."""
+        """
+        Queries for the highest-scoring unuploaded clip with virality >= 95.
+        Applies:
+        1. Unicorn Preemption (Score >= 98: Bypasses caps and uploads immediately).
+        2. Dynamic Solo Spillover: If only 1 streamer active in 24h, cap is 5.
+        3. Fair-Share Anti-Monopoly: If multiple streamers active, cap is 2 per streamer.
+        4. Alternating Streamer Interleave: Prefers a different streamer than last_uploaded_streamer.
+        """
+        active_streamers = await self.get_active_streamers_24h()
+        counts_24h = await self.get_streamer_upload_counts_24h()
+        # Dynamic solo spillover: 5 if solo, 2 if multi
+        streamer_cap = 5 if len(active_streamers) <= 1 else 2
+
         async with self.engine.connect() as conn:
             res = await conn.execute(
                 text("""
@@ -71,51 +126,105 @@ class YouTubeUploadWorker:
                     WHERE (workflow_meta->>'uploaded' IS NULL OR workflow_meta->>'uploaded' = 'false')
                       AND virality_score >= 95
                     ORDER BY virality_score DESC, created_at DESC
-                    LIMIT 1;
+                    LIMIT 20;
                 """)
             )
-            row = res.fetchone()
-            if row:
-                return {
+            rows = res.fetchall()
+            if not rows:
+                return None
+
+            candidates = []
+            for row in rows:
+                wf = row[5] or {}
+                streamer = (wf.get("streamer") or "unknown").lower()
+                score = row[3] or 0
+                candidates.append({
                     "id": row[0],
                     "filename": row[1],
                     "file_path": Path(row[2]),
-                    "virality_score": row[3],
+                    "virality_score": score,
                     "title": row[4],
-                    "workflow_meta": row[5] or {},
+                    "workflow_meta": wf,
                     "text": row[6] or "",
                     "reasoning": row[7] or "",
+                    "streamer": streamer,
                     "is_instant": True,
-                }
-        return None
+                })
+
+            # Check 1: Unicorn Preemption (Score >= 98 always wins instantly)
+            for c in candidates:
+                if c["virality_score"] >= 98:
+                    logger.info("🦄 Unicorn Preemption: Score %d clip '%s' by %s bypasses daily cap!", c["virality_score"], c["title"], c["streamer"])
+                    return c
+
+            # Check 2: Filter by Streamer Cap
+            eligible = [c for c in candidates if counts_24h.get(c["streamer"], 0) < streamer_cap]
+            if not eligible:
+                logger.info("Notice: All 95+ candidates have reached their daily streamer cap (%d clips). Holding for quota reset.", streamer_cap)
+                return None
+
+            # Check 3: Alternating Streamer Interleaving
+            if self.last_uploaded_streamer:
+                diff_streamer = [c for c in eligible if c["streamer"] != self.last_uploaded_streamer.lower()]
+                if diff_streamer:
+                    chosen = diff_streamer[0]
+                    logger.info("🔀 Alternating Interleave: Picked %s (Score %d) after %s.", chosen["streamer"], chosen["virality_score"], self.last_uploaded_streamer)
+                    return chosen
+
+            return eligible[0]
 
     async def get_next_regular_clip(self) -> Optional[Dict[str, Any]]:
-        """Queries for the highest-scoring unuploaded clip with virality < 95."""
+        """
+        Queries for the highest-scoring unuploaded regular clip (75 <= virality < 95).
+        Applies streamer cap and alternating interleaving.
+        """
+        active_streamers = await self.get_active_streamers_24h()
+        counts_24h = await self.get_streamer_upload_counts_24h()
+        streamer_cap = 5 if len(active_streamers) <= 1 else 2
+
         async with self.engine.connect() as conn:
             res = await conn.execute(
                 text("""
                     SELECT id, filename, file_path, virality_score, hook_title, workflow_meta, text, reasoning
                     FROM generated_clips
                     WHERE (workflow_meta->>'uploaded' IS NULL OR workflow_meta->>'uploaded' = 'false')
+                      AND virality_score >= 75
                       AND virality_score < 95
                     ORDER BY virality_score DESC, created_at DESC
-                    LIMIT 1;
+                    LIMIT 20;
                 """)
             )
-            row = res.fetchone()
-            if row:
-                return {
+            rows = res.fetchall()
+            if not rows:
+                return None
+
+            candidates = []
+            for row in rows:
+                wf = row[5] or {}
+                streamer = (wf.get("streamer") or "unknown").lower()
+                candidates.append({
                     "id": row[0],
                     "filename": row[1],
                     "file_path": Path(row[2]),
-                    "virality_score": row[3],
+                    "virality_score": row[3] or 0,
                     "title": row[4],
-                    "workflow_meta": row[5] or {},
+                    "workflow_meta": wf,
                     "text": row[6] or "",
                     "reasoning": row[7] or "",
+                    "streamer": streamer,
                     "is_instant": False,
-                }
-        return None
+                })
+
+            eligible = [c for c in candidates if counts_24h.get(c["streamer"], 0) < streamer_cap]
+            if not eligible:
+                return None
+
+            if self.last_uploaded_streamer:
+                diff_streamer = [c for c in eligible if c["streamer"] != self.last_uploaded_streamer.lower()]
+                if diff_streamer:
+                    return diff_streamer[0]
+
+            return eligible[0]
 
     async def mark_clip_status(self, clip_id: str, uploaded: bool, meta: Dict[str, Any]) -> None:
         """Updates PostgreSQL clip workflow metadata."""
@@ -267,6 +376,10 @@ class YouTubeUploadWorker:
                     },
                 )
                 self.last_upload_time = time.time()
+                streamer = clip.get("streamer") or clip.get("workflow_meta", {}).get("streamer")
+                if streamer:
+                    self.last_uploaded_streamer = streamer.lower()
+                    logger.info("Updated last uploaded streamer: %s", self.last_uploaded_streamer)
 
                 # Automatically prune local video & thumbnail files once 100% verified Public on YouTube
                 try:
@@ -307,10 +420,12 @@ class YouTubeUploadWorker:
         - Zero Drafts Rule: Videos are NEVER sent to drafts. Verified Public before completing.
         """
         logger.info("🎯 Dedicated YouTube Upload & Publishing Worker (Worker 3) STARTED.")
-        logger.info("Cadence Rules Locked:")
-        logger.info("  1. Virality >= 95: INSTANT with 3-4 min (%d-%ds) gap", INSTANT_MIN_COOLDOWN, INSTANT_MAX_COOLDOWN)
-        logger.info("  2. Virality < 95: RANDOM 50-100 min (%d-%ds) gap", REGULAR_MIN_COOLDOWN, REGULAR_MAX_COOLDOWN)
-        logger.info("  3. Zero Drafts Policy: Videos go directly to Public; drafts strictly prohibited.")
+        logger.info("Adaptive Cadence & Fair-Share Rules Locked:")
+        logger.info("  1. Virality >= 98: UNICORN PREEMPTION (Instant upload, bypasses caps)")
+        logger.info("  2. Virality >= 95: Alternating Multi-Streamer Interleaving (3-4 min gap)")
+        logger.info("  3. Dynamic Quota: Max 2/day in multi-streamer days, up to 5/day in solo-streamer days")
+        logger.info("  4. Virality < 95: Strategic Prime Windows (Morning, Midday, Evening, Night) with 50-100 min gap")
+        logger.info("  5. Zero Drafts Policy: Videos go directly to Public; drafts strictly prohibited.")
 
         while True:
             try:
@@ -357,7 +472,6 @@ class YouTubeUploadWorker:
                     )
                     success = await self.upload_clip(clip_95)
                     if success:
-                        self.last_upload_time = time.time()
                         self.current_instant_cooldown = random.randint(INSTANT_MIN_COOLDOWN, INSTANT_MAX_COOLDOWN)
                         logger.info("✅ 95+ Clip is LIVE & PUBLIC! Next 95+ clip in %ds (3-4 min gap).", self.current_instant_cooldown)
                     else:
@@ -383,7 +497,6 @@ class YouTubeUploadWorker:
                         )
                         success = await self.upload_clip(reg_clip)
                         if success:
-                            self.last_upload_time = time.time()
                             gap_seconds = random.randint(REGULAR_MIN_COOLDOWN, REGULAR_MAX_COOLDOWN)
                             self.next_regular_scheduled_time = time.time() + gap_seconds
                             logger.info(
