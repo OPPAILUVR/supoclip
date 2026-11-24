@@ -225,9 +225,10 @@ def detect_streamer_layout(
     # =========================================================================
     # CASE 2: Corner Facecam Overlay on Fullscreen Game (e.g. CaseOh, Asmongold, GTA, etc.)
     # =========================================================================
-    # 40/60 Universal Layout:
-    # - Top 60% (1080 x 1152): Content / Gameplay centered
-    # - Bottom 40% (1080 x 768): Streamer Facecam (10% vertical squeeze so entire facecam fits)
+    # Twitch-Matched 40/60 Vertical Layout:
+    # - Top ~40% (1080 x 760 / 768): Streamer Facecam (high quality Lanczos + unsharp, centered)
+    # - Bottom ~60% (1080 x 1160 / 1152): Content / Gameplay centered (captures >52% screen width)
+    # - Seamless zero gap (direct vstack, no divider lines or black bands)
     # =========================================================================
     diag = float(np.hypot(width / 2, height / 2))
     corner_candidates = []
@@ -245,18 +246,15 @@ def detect_streamer_layout(
         corner_candidates.sort(key=lambda x: (x["corner_dist"], -x["count"]))
         webcam = corner_candidates[0]
 
-        top_h = 1152   # 60% of 1920
-        bottom_h = 768  # 40% of 1920
+        top_h = 760    # ~40% of 1920 (matching Twitch portrait aspect 1008x708)
+        bottom_h = OUT_H - top_h  # 1160 (~60% of 1920)
 
         is_left = webcam["cx"] < width / 2
 
         # Webcam boundary estimation:
-        # Use corner edge and scale width based on face dimensions & position
-        crop_cam_w = round_to_even(int(min(width * 0.40, max(webcam["w"] * 3.8, width * 0.21))))
-        
-        # Squeeze 10% vertically so the full webcam comes under the 40% tile
-        norm_cam_h = int(crop_cam_w * bottom_h / OUT_W)
-        crop_cam_h = round_to_even(int(norm_cam_h * 1.10))
+        # Match aspect ratio of top tile (OUT_W / top_h = 1080 / 760 = 1.421)
+        crop_cam_w = round_to_even(int(min(width * 0.35, max(webcam["w"] * 3.5, width * 0.203))))
+        crop_cam_h = round_to_even(int(crop_cam_w * top_h / OUT_W))
 
         if is_left:
             cam_x = 0
@@ -265,11 +263,9 @@ def detect_streamer_layout(
 
         # Center on face with headroom & chinroom bounds
         cam_y = int(webcam["cy"] - crop_cam_h * 0.45)
-        # Ensure headroom above face
         face_top = webcam["cy"] - webcam["h"] / 2
         if cam_y > face_top - 20:
             cam_y = int(face_top - 20)
-        # Ensure chin is never cut off
         face_bottom = webcam["cy"] + webcam["h"] / 2
         if cam_y + crop_cam_h < face_bottom + 25:
             cam_y = int(face_bottom + 25 - crop_cam_h)
@@ -277,36 +273,38 @@ def detect_streamer_layout(
         cam_x = clamp_even(cam_x, 0, width - crop_cam_w)
         cam_y = clamp_even(cam_y, 0, height - crop_cam_h)
 
-        # Content region (Top 60%):
+        # Content / Gameplay region (Bottom ~60%):
         game_h = height
-        game_w = round_to_even(int(game_h * OUT_W / top_h))  # ~1012 px
+        game_w = round_to_even(int(game_h * OUT_W / bottom_h))  # 1006 px (captures 52.4% screen width)
 
         # Center horizontally, shifted cleanly away from the corner webcam
         if is_left:
-            game_x = clamp_even(max(crop_cam_w, (width - game_w) // 2), 0, width - game_w)
+            game_x = clamp_even(max(cam_x + crop_cam_w + 10, (width - game_w) // 2), 0, width - game_w)
         else:
-            game_x = clamp_even(min(width - crop_cam_w - game_w, (width - game_w) // 2), 0, width - game_w)
+            game_x = clamp_even(min(cam_x - game_w - 10, (width - game_w) // 2), 0, width - game_w)
 
+        # Seamless vstack: Facecam on TOP, Gameplay on BOTTOM, zero gap, unsharp filter for high sharpness
         video_filter = (
             f"[0:v]split=2[camsrc][gamesrc];"
-            f"[gamesrc]crop={game_w}:{game_h}:{game_x}:0,"
-            f"scale={OUT_W}:{top_h}:flags=lanczos,setsar=1[top];"
             f"[camsrc]crop={crop_cam_w}:{crop_cam_h}:{cam_x}:{cam_y},"
+            f"scale={OUT_W}:{top_h}:flags=lanczos,unsharp=lx=3:ly=3:la=0.6,setsar=1[top];"
+            f"[gamesrc]crop={game_w}:{game_h}:{game_x}:0,"
             f"scale={OUT_W}:{bottom_h}:flags=lanczos,setsar=1[bottom];"
-            f"[top][bottom]vstack=inputs=2[stacked];"
-            f"[stacked]drawbox=x=0:y={top_h-2}:w={OUT_W}:h=4:color=white@0.5:t=fill[vout]"
+            f"[top][bottom]vstack=inputs=2[vout]"
         )
 
-        caption_y = 0.80
+        caption_y = 0.85
         logger.info(
-            "Configured 40/60 Corner Facecam layout: Webcam (%d,%d at %d,%d), Game (%d,%d at %d,%d), CaptionY=%.2f",
-            crop_cam_w, crop_cam_h, cam_x, cam_y, game_w, game_h, game_x, 0, caption_y
+            "Configured Twitch-Matched 40/60 Layout: Webcam on Top (%d,%d at %d,%d -> %dx%d), Game on Bottom (%d,%d at %d,0 -> %dx%d), CaptionY=%.2f, Zero Gap",
+            crop_cam_w, crop_cam_h, cam_x, cam_y, OUT_W, top_h,
+            game_w, game_h, game_x, OUT_W, bottom_h,
+            caption_y
         )
         return {
             "video_filter": video_filter,
             "mode": "complex",
             "caption_y": caption_y,
-            "layout_type": "corner_facecam_40_60",
+            "layout_type": "twitch_vertical_40_60",
         }
 
     # =========================================================================
