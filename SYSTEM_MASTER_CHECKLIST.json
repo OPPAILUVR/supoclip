@@ -23,16 +23,22 @@
     },
     "thumbnail": {
       "mandatory": true,
+      "format": "9:16_VERTICAL_1080x1920",
       "color_grade": {
-        "saturation_boost": 1.25,
-        "contrast_boost": 1.15
+        "saturation_boost": 1.30,
+        "contrast_boost": 1.18,
+        "sharpness_boost": 1.20
       },
-      "climax_frame_window": [0.35, 0.60],
+      "face_aware_placement": true,
+      "attention_arrow": true,
+      "gradient_shading": true,
+      "climax_frame_detector": "YuNet_DNN_plus_facial_emotion_variance",
+      "climax_frame_window": [0.15, 0.85],
       "typography": {
         "font": "Impact",
-        "color": "#FFE600",
+        "colors": ["#FFFFFF", "#FFE600"],
         "stroke_color": "#000000",
-        "stroke_width": 10,
+        "stroke_width": 14,
         "drop_shadow": true
       },
       "reaction_badge": {

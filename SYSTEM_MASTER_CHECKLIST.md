@@ -57,3 +57,15 @@ The watchdog worker executes every 3 hours (180 minutes) to verify:
 4. **Worker Heartbeat**: Verifies `live_stream_worker` and `youtube_upload_worker` are active.
 5. **Storage Check**: Confirms total disk footprint is $<10\text{ GB}$ and prunes items older than 48 hours.
 6. **Audit Trail**: Logs results to `SYSTEM_AUDIT_LOG.json` and synchronizes with `AGY_SYSTEM_MEMORY.json`.
+
+---
+
+## 6. HIGH-CTR 9:16 VIRAL THUMBNAIL ENGINE
+
+- **Strict 9:16 Vertical Canvas**: $1080 \times 1920\text{px}$ master export + $1280 \times 720\text{px}$ desktop companion.
+- **YuNet DNN Peak Climax Detection**: Scans $15\% - 85\%$ of video; scores by face size, facial emotion variance (mouth wide open, screaming, shock), and visual contrast.
+- **Face-Aware Layout (Zero Obscuration)**: Computes face coordinates; places the hook banner in the center divider zone ($Y \approx 740 - 920$) below the webcam, never covering the streamer's reaction face.
+- **Cinematic Shading**: Soft vertical alpha gradient behind text for $100\%$ crisp legibility on any background.
+- **Multi-Color 3D Typography**: Line 1 Polar White (`#FFFFFF`) + Line 2 Electric Yellow (`#FFE600`) with $14\text{px}$ pitch-black stroke and deep drop shadow.
+- **Attention Callout**: Curved neon red/yellow arrow pointing directly to the emotional reaction focal point.
+- **Reaction Pill Badge**: YouTube Red (`#E50914`) rounded badge with crisp white outline and emotional callout.

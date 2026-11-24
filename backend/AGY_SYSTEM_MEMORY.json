@@ -53,14 +53,17 @@
     },
     "thumbnail_generation": {
       "mandatory": true,
-      "aspect_ratios": [
-        "9:16",
-        "16:9"
-      ],
-      "typography": "Impact_Bold",
-      "color_palette": "Electric_Yellow_and_White",
-      "pill_badge": "Red_Background_White_Text",
-      "climax_frame_scoring": "laplacian_variance_plus_saturation"
+      "primary_format": "9:16_VERTICAL_1080x1920",
+      "companion_format": "16:9_LANDSCAPE_1280x720",
+      "face_aware_placement": "Never obscures streamer face; sits in center divider zone (Y:740-920) or upper safe zone",
+      "visual_hook_elements": {
+        "attention_callout": "Curved neon red/yellow arrow pointing directly to peak emotional reaction",
+        "cinematic_gradient": "Soft vertical alpha gradient backing behind text for 100% contrast against bright video backgrounds",
+        "typography": "Multi-Color 3D Impact Bold (Polar White + Electric Yellow with 14px black outline & drop shadow)",
+        "reaction_pill_badge": "YouTube Red (#E50914) rounded badge with crisp white outline & emoji callout"
+      },
+      "climax_frame_scoring": "YuNet DNN face tracking + facial emotion intensity variance (wide open mouth / screaming / surprise) + contrast",
+      "psychological_curiosity_hooks": "Terror, Rage, Instant Regret, Caught in 4K, Controversy, or Incomplete Story curiosity gaps"
     },
     "youtube_distribution": {
       "publishing_cadence": {
@@ -133,7 +136,7 @@
     }
   },
   "performance_feedback_loop": {
-    "last_audit_at": "2026-11-24T13:43:11.338971+00:00",
+    "last_audit_at": "2026-11-24T16:27:16.623541+00:00",
     "total_audited_clips": 12,
     "breakout_winners": [],
     "view_jail_30k_pool": [],
@@ -144,11 +147,11 @@
       "facial_reaction_weight": 0.2
     }
   },
-  "last_system_audit": "2026-11-24T13:43:05.922936+00:00",
-  "last_audit_status": "PASS",
+  "last_system_audit": "2026-11-24T16:26:50.204492+00:00",
+  "last_audit_status": "ATTENTION_REQUIRED",
   "audit_summary": {
-    "workers": true,
-    "storage_gb": 0.0,
+    "workers": false,
+    "storage_gb": 0.15,
     "drafts_in_studio": 0
   }
 }

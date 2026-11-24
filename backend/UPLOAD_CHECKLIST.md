@@ -41,7 +41,7 @@ If any check fails, the clip is **held locally** and the failure is logged. No v
 
 ## 5. Thumbnail
 
-- [ ] **Thumbnail was generated** — OpenCV peak-emotion/climax frame selection (+25% sat, +15% contrast, Impact bold typography with electric yellow accents, red reaction pill badge).
+- [ ] **High-CTR 9:16 Thumbnail generated** — YuNet face-aware peak-emotion climax frame selection, multi-color 3D Impact bold typography, cinematic gradient contrast backing, curved neon attention arrow, red reaction pill badge, strict 1080x1920.
 - [ ] **Thumbnail was attached** — uploaded and attached directly to the YouTube Studio video entry.
 
 ## 6. Allowed Streamers
