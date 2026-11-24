@@ -709,26 +709,147 @@ class LiveStreamService:
                 logger.info("Updated active live session %s clip_format to %s", streamer_id, clip_format)
         return res.rowcount > 0
 
+    @classmethod
+    def get_active_session_ids(cls) -> List[str]:
+        """Return list of currently active live stream session IDs in memory."""
+        with _sessions_lock:
+            return list(_active_sessions.keys())
+
     @staticmethod
     async def delete_streamer(db: AsyncSession, user_id: str, streamer_id: str) -> bool:
-        """Remove streamer and stop active recording session."""
-        LiveStreamService.stop_buffer_recording(streamer_id)
+        """Completely remove streamer, stop all active recording sessions, and wipe all associated clips, tasks, events, and files."""
+        # 1. Fetch streamer details before deletion
         res = await db.execute(
+            text("SELECT id, name, current_task_id FROM live_streamers WHERE id = :id AND user_id = :user_id"),
+            {"id": streamer_id, "user_id": user_id},
+        )
+        streamer = res.fetchone()
+        if not streamer:
+            return False
+
+        streamer_name = streamer[1]
+        current_task_id = streamer[2]
+
+        # 2. Terminate active recording in this process and purge buffer on disk
+        LiveStreamService.stop_buffer_recording(streamer_id)
+        buffer_dir = Path("uploads/live_buffers") / streamer_id
+        if buffer_dir.exists():
+            shutil.rmtree(buffer_dir, ignore_errors=True)
+
+        # 3. Find all tasks created for this streamer
+        task_ids = set()
+        if current_task_id:
+            task_ids.add(str(current_task_id))
+
+        task_res = await db.execute(
+            text("""
+                SELECT id FROM tasks 
+                WHERE user_id = :user_id 
+                  AND (
+                      CAST(source_metadata AS TEXT) ILIKE :meta_pattern 
+                      OR CAST(source_metadata AS TEXT) ILIKE :meta_pattern_loose
+                  )
+            """),
+            {
+                "user_id": user_id,
+                "meta_pattern": f'%"streamer": "{streamer_name}"%',
+                "meta_pattern_loose": f'%{streamer_name}%',
+            },
+        )
+        for tr in task_res.fetchall():
+            task_ids.add(str(tr[0]))
+
+        # 4. Find all generated clips to delete physical files from disk
+        clip_paths = set()
+        if task_ids:
+            clips_res = await db.execute(
+                text("SELECT id, file_path, filename FROM generated_clips WHERE task_id = ANY(:tids)"),
+                {"tids": list(task_ids)},
+            )
+            for cr in clips_res.fetchall():
+                if cr.file_path:
+                    clip_paths.add(Path(cr.file_path))
+
+        streamer_clips_res = await db.execute(
+            text("SELECT id, file_path, filename FROM generated_clips WHERE workflow_meta->>'streamer' = :streamer_name"),
+            {"streamer_name": streamer_name},
+        )
+        for cr in streamer_clips_res.fetchall():
+            if cr.file_path:
+                clip_paths.add(Path(cr.file_path))
+
+        # Also purge any files matching streamer ID prefix or streamer name in CLIPS_DIR
+        clips_dir = Path("clips")
+        if clips_dir.exists():
+            id_prefix = streamer_id[:8]
+            for clip_file in clips_dir.glob(f"*{id_prefix}*"):
+                clip_paths.add(clip_file)
+            for clip_file in clips_dir.glob(f"*{streamer_name}*"):
+                clip_paths.add(clip_file)
+
+        # 5. Delete physical video, thumbnail, and subtitle files from disk
+        for p in clip_paths:
+            try:
+                if p.exists():
+                    p.unlink(missing_ok=True)
+                for ext in ["_thumb.jpg", "_thumb_16x9.jpg", ".ass", ".srt"]:
+                    companion = p.parent / f"{p.stem}{ext}"
+                    if companion.exists():
+                        companion.unlink(missing_ok=True)
+            except Exception as file_err:
+                logger.warning("Error deleting clip file %s: %s", p, file_err)
+
+        # 6. Delete database records in proper dependency order
+        await db.execute(
+            text("DELETE FROM live_stream_events WHERE streamer_id = :id"),
+            {"id": streamer_id},
+        )
+
+        if task_ids:
+            await db.execute(
+                text("DELETE FROM generated_clips WHERE task_id = ANY(:tids)"),
+                {"tids": list(task_ids)},
+            )
+        await db.execute(
+            text("DELETE FROM generated_clips WHERE workflow_meta->>'streamer' = :streamer_name"),
+            {"streamer_name": streamer_name},
+        )
+
+        if task_ids:
+            await db.execute(
+                text("DELETE FROM tasks WHERE id = ANY(:tids)"),
+                {"tids": list(task_ids)},
+            )
+
+        del_res = await db.execute(
             text("DELETE FROM live_streamers WHERE id = :id AND user_id = :user_id"),
             {"id": streamer_id, "user_id": user_id},
         )
         await db.commit()
-        return res.rowcount > 0
+        logger.info("Completely deleted streamer %s (%s) and all associated clips, tasks, and buffers.", streamer_name, streamer_id)
+        return del_res.rowcount > 0
 
     @staticmethod
     async def toggle_streamer(db: AsyncSession, user_id: str, streamer_id: str, is_active: bool) -> bool:
-        """Toggle active monitoring for a streamer."""
+        """Toggle active monitoring for a streamer (Active vs Paused)."""
         if not is_active:
             LiveStreamService.stop_buffer_recording(streamer_id)
-        res = await db.execute(
-            text("UPDATE live_streamers SET is_active = :is_active WHERE id = :id AND user_id = :user_id"),
-            {"id": streamer_id, "user_id": user_id, "is_active": is_active},
-        )
+            buffer_dir = Path("uploads/live_buffers") / streamer_id
+            if buffer_dir.exists():
+                shutil.rmtree(buffer_dir, ignore_errors=True)
+            res = await db.execute(
+                text("""
+                    UPDATE live_streamers 
+                    SET is_active = false, is_live = false, current_stream_url = null 
+                    WHERE id = :id AND user_id = :user_id
+                """),
+                {"id": streamer_id, "user_id": user_id},
+            )
+        else:
+            res = await db.execute(
+                text("UPDATE live_streamers SET is_active = true WHERE id = :id AND user_id = :user_id"),
+                {"id": streamer_id, "user_id": user_id},
+            )
         await db.commit()
         return res.rowcount > 0
 
@@ -953,6 +1074,11 @@ class LiveStreamService:
                 if session.buffer_dir.exists():
                     shutil.rmtree(session.buffer_dir, ignore_errors=True)
                 logger.info("Stopped live buffer recording and deleted buffer directory for streamer %s", streamer_id)
+
+        # Even if session was not in this process's in-memory dictionary, purge disk buffer
+        disk_buffer = Path("uploads/live_buffers") / streamer_id
+        if disk_buffer.exists():
+            shutil.rmtree(disk_buffer, ignore_errors=True)
 
     @staticmethod
     def clean_analysis_artifacts(analysis_dir: Path) -> None:

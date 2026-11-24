@@ -204,28 +204,47 @@ export default function LiveStreamPage() {
   };
 
   const handleToggle = async (streamerId: string, currentStatus: boolean) => {
+    const nextStatus = !currentStatus;
+    // Optimistic UI update: flip active state immediately
+    setStreamers((prev) =>
+      prev.map((s) => (s.id === streamerId ? { ...s, is_active: nextStatus, is_live: nextStatus ? s.is_live : false } : s))
+    );
     try {
-      await fetch(`/api/live-streamers/${streamerId}/toggle`, {
+      const res = await fetch(`/api/live-streamers/${streamerId}/toggle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_active: !currentStatus }),
+        body: JSON.stringify({ is_active: nextStatus }),
       });
+      if (!res.ok) {
+        console.error("Toggle request failed on server");
+      }
       await loadStreamers();
     } catch (e) {
       console.error("Failed to toggle:", e);
+      await loadStreamers();
     }
   };
 
   const handleDelete = async (streamerId: string) => {
-    if (!confirm("Are you sure you want to remove this streamer?")) return;
+    if (!confirm("Are you sure you want to completely delete this streamer and all its data?")) return;
+    // Optimistic UI update: remove streamer immediately from local state
+    setStreamers((prev) => prev.filter((s) => s.id !== streamerId));
+    if (selectedStreamer === streamerId) {
+      setSelectedStreamer("all");
+    }
+    // Remove clips belonging to this streamer immediately
+    setClips((prev) => prev.filter((c) => c.streamer_id !== streamerId));
     try {
-      await fetch(`/api/live-streamers/${streamerId}`, { method: "DELETE" });
-      if (selectedStreamer === streamerId) {
-        setSelectedStreamer("all");
+      const res = await fetch(`/api/live-streamers/${streamerId}`, { method: "DELETE" });
+      if (!res.ok) {
+        console.error("Delete request failed on server");
       }
       await loadStreamers();
+      await loadClips();
     } catch (e) {
       console.error("Failed to delete:", e);
+      await loadStreamers();
+      await loadClips();
     }
   };
 
@@ -479,8 +498,13 @@ export default function LiveStreamPage() {
                         <p className="mt-0.5 text-xs text-muted-foreground">{s.channel_handle}</p>
                       </div>
 
-                      {/* Live Badge */}
-                      {s.is_live ? (
+                      {/* Live / Paused / Offline Badge */}
+                      {!s.is_active ? (
+                        <span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-400 border border-amber-500/20">
+                          <span className="size-2 rounded-full bg-amber-400" />
+                          PAUSED
+                        </span>
+                      ) : s.is_live ? (
                         <span className="flex items-center gap-1.5 rounded-full bg-red-500/20 px-2.5 py-1 text-xs font-bold text-red-500 animate-pulse">
                           <span className="size-2 rounded-full bg-red-500" />
                           LIVE NOW
@@ -546,26 +570,30 @@ export default function LiveStreamPage() {
 
                       <div className="flex items-center gap-2">
                         <button
-                          title={s.is_active ? "Pause monitoring" : "Resume monitoring"}
+                          type="button"
+                          title={s.is_active ? "Click to pause auto-clipping" : "Click to resume auto-clipping"}
                           onClick={(e) => {
                             e.stopPropagation();
                             handleToggle(s.id, s.is_active);
                           }}
-                          className={`rounded px-2 py-1 text-xs font-medium transition ${
-                            s.is_active ? "text-emerald-400 hover:bg-emerald-500/10" : "text-amber-400 hover:bg-amber-500/10"
+                          className={`rounded px-2.5 py-1 text-xs font-semibold transition border ${
+                            s.is_active
+                              ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20"
+                              : "bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/20"
                           }`}
                         >
-                          {s.is_active ? "Active" : "Paused"}
+                          {s.is_active ? "● Active" : "⏸ Paused"}
                         </button>
                         <button
-                          title="Remove streamer"
+                          type="button"
+                          title="Permanently delete streamer and all associated clips"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleDelete(s.id);
                           }}
-                          className="text-muted-foreground hover:text-red-400 transition"
+                          className="rounded p-1 text-muted-foreground hover:bg-red-500/10 hover:text-red-400 transition"
                         >
-                          <Trash2 className="size-3.5" />
+                          <Trash2 className="size-4" />
                         </button>
                       </div>
                     </div>

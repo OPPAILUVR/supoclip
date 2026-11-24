@@ -210,8 +210,28 @@ async def process_single_streamer(s: Any) -> None:
             _processing_streamers.discard(streamer_id)
 
 
+async def halt_inactive_streamer_sessions() -> None:
+    """Checks running sessions in this worker process and immediately terminates any that were paused or deleted."""
+    running_ids = LiveStreamService.get_active_session_ids()
+    if not running_ids:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(text("SELECT id FROM live_streamers WHERE is_active = true"))
+            active_ids = {r[0] for r in res.fetchall()}
+        for running_id in running_ids:
+            if running_id not in active_ids:
+                logger.info("Streamer %s is paused or deleted. Halting buffer recording immediately.", running_id)
+                LiveStreamService.stop_buffer_recording(running_id)
+    except Exception as e:
+        logger.debug("Notice in halt_inactive_streamer_sessions: %s", e)
+
+
 async def run_live_stream_monitor_cycle() -> None:
     """Run concurrent polling and processing across ALL active streamers simultaneously."""
+    # 1. Immediately halt any sessions that were paused or deleted
+    await halt_inactive_streamer_sessions()
+
     async with AsyncSessionLocal() as db:
         res = await db.execute(
             text("SELECT * FROM live_streamers WHERE is_active = true")
@@ -248,7 +268,10 @@ async def live_stream_monitor_loop(poll_interval_seconds: int = 35) -> None:
             await run_live_stream_monitor_cycle()
         except Exception as e:
             logger.error("Error in live stream monitor cycle: %s", e)
-        await asyncio.sleep(poll_interval_seconds)
+        # Check every 2s for rapid reaction to user pause/delete actions
+        for _ in range(max(1, poll_interval_seconds // 2)):
+            await asyncio.sleep(2)
+            await halt_inactive_streamer_sessions()
 
 
 if __name__ == "__main__":
