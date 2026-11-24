@@ -223,9 +223,12 @@ def detect_streamer_layout(
         }
 
     # =========================================================================
-    # CASE 2: Corner Facecam Overlay on Fullscreen Game (e.g. GTA, gaming)
+    # CASE 2: Corner Facecam Overlay on Fullscreen Game (e.g. CaseOh, Asmongold, GTA, etc.)
     # =========================================================================
-    # The streamer is in a small corner box (h_frac < 0.18, corner_dist < 0.52)
+    # 40/60 Universal Layout:
+    # - Top 60% (1080 x 1152): Content / Gameplay centered
+    # - Bottom 40% (1080 x 768): Streamer Facecam (10% vertical squeeze so entire facecam fits)
+    # =========================================================================
     diag = float(np.hypot(width / 2, height / 2))
     corner_candidates = []
     for c in stable_clusters:
@@ -234,7 +237,7 @@ def detect_streamer_layout(
         dist_br = np.hypot(width - c["cx"], height - c["cy"])
         dist_bl = np.hypot(c["cx"], height - c["cy"])
         cdist = float(min(dist_tr, dist_tl, dist_br, dist_bl) / diag)
-        if cdist < 0.52 and c["h_frac"] < 0.18:
+        if cdist < 0.55 and c["h_frac"] < 0.22:
             corner_candidates.append({**c, "corner_dist": cdist})
 
     if corner_candidates:
@@ -242,57 +245,68 @@ def detect_streamer_layout(
         corner_candidates.sort(key=lambda x: (x["corner_dist"], -x["count"]))
         webcam = corner_candidates[0]
 
-        top_h = 760
-        bottom_h = OUT_H - top_h  # 1160
+        top_h = 1152   # 60% of 1920
+        bottom_h = 768  # 40% of 1920
 
-        # Zoomed-out webcam crop: capture comfortable 16:9 webcam framing
-        crop_cam_w = round_to_even(int(min(width, max(webcam["w"] * 5.2, width * 0.32))))
-        crop_cam_h = round_to_even(int(crop_cam_w * top_h / OUT_W))
+        is_left = webcam["cx"] < width / 2
 
-        if webcam["cx"] > width * 0.6:
-            cam_x = max(0, width - crop_cam_w)
-        elif webcam["cx"] < width * 0.4:
+        # Webcam boundary estimation:
+        # Use corner edge and scale width based on face dimensions & position
+        crop_cam_w = round_to_even(int(min(width * 0.40, max(webcam["w"] * 3.8, width * 0.21))))
+        
+        # Squeeze 10% vertically so the full webcam comes under the 40% tile
+        norm_cam_h = int(crop_cam_w * bottom_h / OUT_W)
+        crop_cam_h = round_to_even(int(norm_cam_h * 1.10))
+
+        if is_left:
             cam_x = 0
         else:
-            cam_x = clamp_even(int(webcam["cx"] - crop_cam_w / 2), 0, width - crop_cam_w)
+            cam_x = max(0, width - crop_cam_w)
 
-        if webcam["cy"] < height * 0.4:
-            cam_y = 0
-        elif webcam["cy"] > height * 0.6:
-            cam_y = max(0, height - crop_cam_h)
+        # Center on face with headroom & chinroom bounds
+        cam_y = int(webcam["cy"] - crop_cam_h * 0.45)
+        # Ensure headroom above face
+        face_top = webcam["cy"] - webcam["h"] / 2
+        if cam_y > face_top - 20:
+            cam_y = int(face_top - 20)
+        # Ensure chin is never cut off
+        face_bottom = webcam["cy"] + webcam["h"] / 2
+        if cam_y + crop_cam_h < face_bottom + 25:
+            cam_y = int(face_bottom + 25 - crop_cam_h)
+
+        cam_x = clamp_even(cam_x, 0, width - crop_cam_w)
+        cam_y = clamp_even(cam_y, 0, height - crop_cam_h)
+
+        # Content region (Top 60%):
+        game_h = height
+        game_w = round_to_even(int(game_h * OUT_W / top_h))  # ~1012 px
+
+        # Center horizontally, shifted cleanly away from the corner webcam
+        if is_left:
+            game_x = clamp_even(max(crop_cam_w, (width - game_w) // 2), 0, width - game_w)
         else:
-            cam_y = clamp_even(int(webcam["cy"] - crop_cam_h * 0.40), 0, height - crop_cam_h)
-
-        # Bottom tile: Game content, shifted away from the webcam corner so webcam is not duplicated
-        game_h = round_to_even(height)
-        game_w = round_to_even(int(game_h * OUT_W / bottom_h))  # ~1004px
-
-        if webcam["cx"] > width * 0.5:
-            # Webcam is on right -> center gameplay on left-center
-            game_x = clamp_even(int(width * 0.20), 0, width - game_w)
-        else:
-            # Webcam is on left -> center gameplay on right-center
-            game_x = clamp_even(int(width * 0.80 - game_w), 0, width - game_w)
+            game_x = clamp_even(min(width - crop_cam_w - game_w, (width - game_w) // 2), 0, width - game_w)
 
         video_filter = (
-            f"[0:v]split=2[cam_src][game_src];"
-            f"[cam_src]crop={crop_cam_w}:{crop_cam_h}:{cam_x}:{cam_y},"
+            f"[0:v]split=2[camsrc][gamesrc];"
+            f"[gamesrc]crop={game_w}:{game_h}:{game_x}:0,"
             f"scale={OUT_W}:{top_h}:flags=lanczos,setsar=1[top];"
-            f"[game_src]crop={game_w}:{game_h}:{game_x}:0,"
+            f"[camsrc]crop={crop_cam_w}:{crop_cam_h}:{cam_x}:{cam_y},"
             f"scale={OUT_W}:{bottom_h}:flags=lanczos,setsar=1[bottom];"
-            f"[top][bottom]vstack=inputs=2[vout]"
+            f"[top][bottom]vstack=inputs=2[stacked];"
+            f"[stacked]drawbox=x=0:y={top_h-2}:w={OUT_W}:h=4:color=white@0.5:t=fill[vout]"
         )
 
-        caption_y = 0.82
+        caption_y = 0.80
         logger.info(
-            "Configured Corner Facecam layout: Webcam (%d,%d), Game (%d,%d), CaptionY=%.2f",
-            crop_cam_w, crop_cam_h, game_w, game_h, caption_y
+            "Configured 40/60 Corner Facecam layout: Webcam (%d,%d at %d,%d), Game (%d,%d at %d,%d), CaptionY=%.2f",
+            crop_cam_w, crop_cam_h, cam_x, cam_y, game_w, game_h, game_x, 0, caption_y
         )
         return {
             "video_filter": video_filter,
             "mode": "complex",
             "caption_y": caption_y,
-            "layout_type": "corner_facecam",
+            "layout_type": "corner_facecam_40_60",
         }
 
     # =========================================================================

@@ -1591,23 +1591,34 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
             subprocess.run(extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             # -----------------------------------------------------------
-            # Step 2: Streamer Ambient Blurred Canvas Format (1080x1920)
-            # Center foreground stream cropped 6% left, 6% right,
-            # 1% top, and 1% bottom, scaled to fill 1080w and centered vertically.
-            # Top and bottom ambient blurred regions remain untouched.
+            # Step 2: Streamer Layout Format (1080x1920)
+            # Detect corner facecam (40/60 format) or side-by-side stream layout.
+            # Falls back to ambient blurred canvas format if single-camera/fullscreen.
             # -----------------------------------------------------------
-            video_filter = (
-                "[0:v]split=2[bgsrc][fgsrc];"
-                "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
-                "[fgsrc]crop=trunc(iw*0.88/2)*2:trunc(ih*0.98/2)*2:trunc(iw*0.06/2)*2:trunc(ih*0.01/2)*2,scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2[vout]"
-            )
-            mode = "complex"
-            caption_y = 0.80
-            logger.info(
-                "Applying ambient blurred canvas format with 6%% side crop (1%% top/bottom) for %s (caption_y=0.80)",
-                session.streamer_name,
-            )
+            streamer_layout = detect_streamer_layout(temp_source, 1920, 1080)
+            if streamer_layout:
+                video_filter = streamer_layout["video_filter"]
+                mode = streamer_layout["mode"]
+                caption_y = streamer_layout.get("caption_y", 0.80)
+                logger.info(
+                    "Applied %s layout for %s (caption_y=%.2f)",
+                    streamer_layout.get("layout_type", "custom"),
+                    session.streamer_name,
+                    caption_y,
+                )
+            else:
+                video_filter = (
+                    "[0:v]split=2[bgsrc][fgsrc];"
+                    "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
+                    "[fgsrc]crop=trunc(iw*0.88/2)*2:trunc(ih*0.98/2)*2:trunc(iw*0.06/2)*2:trunc(ih*0.01/2)*2,scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                    "[bg][fg]overlay=(W-w)/2:(H-h)/2[vout]"
+                )
+                mode = "complex"
+                caption_y = 0.80
+                logger.info(
+                    "Applying ambient blurred canvas format with 6%% side crop (1%% top/bottom) for %s (caption_y=0.80)",
+                    session.streamer_name,
+                )
 
             # -----------------------------------------------------------
             # Step 3: Build styled ASS subtitles with dynamic caption placement
