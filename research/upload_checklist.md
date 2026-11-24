@@ -1,29 +1,34 @@
 # SupoClip — YouTube Upload Pre-Flight Checklist
+**Current Operational Specification (Version 2.5.0)**
 
 Every clip **must** pass every item below before the upload worker sends it to YouTube.
-If any check fails, the clip is **held locally** and the failure is logged. No video touches YouTube until every box can be ticked.
+If any check fails, the clip is **held locally** and the failure is logged. No video touches YouTube until every box is verified.
 
 ---
 
-## 1. Video File Integrity
+## 1. Video File Integrity & Format
 
 - [ ] **File exists on disk** — `file_path` resolves to a real `.mp4` file. If missing, mark `file_not_found` and skip.
 - [ ] **File is not empty** — file size > 0 bytes.
 - [ ] **Has video stream** — `ffprobe` confirms at least one video track (codec: h264/h265).
 - [ ] **Has audio stream** — `ffprobe` confirms at least one audio track (codec: aac/opus). Zero-audio clips must never upload.
+- [ ] **Correct Streamer Layout Format** — Rendered according to the streamer's configured preference:
+  - **`40/60 Split`**: Top 40% facecam (1080x760, Lanczos + unsharp 0.6) + Bottom 60% gameplay (1080x1160, Lanczos) with zero gap.
+  - **`Top-Down Blur`**: Centered stream overlay over ambient blurred background canvas (1080x1920, `boxblur=25:5`).
 
-## 2. Duration
+## 2. Duration & Story Context
 
 - [ ] **Minimum 30 seconds** — clip duration ≥ 30.0s. Reject anything shorter.
-- [ ] **Context-appropriate length** — duration is determined by the content, not a fixed number. Acceptable range: **30–58 seconds**. Do not rigidly cut every clip at 38 seconds.
-- [ ] **Under 60 seconds** — must qualify as a YouTube Short (< 60s).
+- [ ] **Context-appropriate length** — duration dynamically adapts to the narrative context. Snaps to sentence boundaries without premature cuts.
+- [ ] **Long-format reaction & topic transitions** — story arcs and rants (e.g. Asmongold reaction breakdowns) expand dynamically up to 175.0s to capture setup, reaction, monologue, and punchline.
+- [ ] **Under 180 seconds** — strictly within YouTube Shorts 3-minute limit (expanded Oct 2024).
 
 ## 3. Title
 
 - [ ] **Title is not empty** — a non-blank `hook_title` exists.
-- [ ] **Title is unique** — no other Public video on the channel already has this exact title. Pre-upload audit checks the YouTube Studio table for duplicates.
+- [ ] **Title is unique** — no other Public video on the channel already has this exact title.
 - [ ] **Ends with `#shorts`** — append `#shorts` if not already present.
-- [ ] **Title is different from other queued clips** — not the same title as any other clip waiting in the upload queue.
+- [ ] **Bespoke and content-grounded** — generated with curiosity-gap verbs based on actual dialogue. Zero generic template clickbait.
 
 ## 4. Description
 
@@ -31,40 +36,45 @@ If any check fails, the clip is **held locally** and the failure is logged. No v
 - [ ] **Contains streamer attribution** — text includes `🎮 Featured Streamer:` with the correct display name and @handle.
 - [ ] **Contains original stream link** — text includes `📺 Watch original stream:` with a valid URL.
 - [ ] **Contains fair use disclaimer** — text includes the Section 107 Copyright Act notice and takedown email.
-- [ ] **Contains hashtags** — text includes `#shorts` and streamer-specific hashtag at the end.
-- [ ] **Description was actually filled in YouTube Studio** — the `#description-textarea #textbox` locator was found, clicked, and `.fill()` succeeded. If the locator returns 0 elements, **abort the upload** and log an error — do not silently skip.
+- [ ] **Contains hashtags** — text includes `#shorts` and streamer-specific hashtags.
+- [ ] **Description filled in YouTube Studio** — description text area successfully populated via automated upload session.
 
 ## 5. Thumbnail
 
-- [ ] **Thumbnail was generated** — `generate_viral_thumbnail()` produced a `.jpg` file that exists on disk.
-- [ ] **Thumbnail was attached** — the `input[type='file'][accept*='image']` element was found and `.set_input_files()` was called. Log whether attachment succeeded or fell back to file chooser.
+- [ ] **Thumbnail was generated** — OpenCV peak-emotion/climax frame selection (+25% sat, +15% contrast, Impact bold typography with electric yellow accents, red reaction pill badge).
+- [ ] **Thumbnail was attached** — uploaded and attached directly to the YouTube Studio video entry.
 
 ## 6. Allowed Streamers
 
-- [ ] **Streamer is on the approved list** — the clip's `workflow_meta.streamer` matches one of: `ishowspeed`, `asmong`, `kai`, `botez`. If the streamer is `xqc`, `jynxzi`, or `adinross` (or any other name not on the list), **reject the clip** and do not upload.
+- [ ] **Streamer is approved or actively tracked** — streamer matches an active monitored streamer in PostgreSQL `live_streamers` (e.g. `asmong`, `caseoh`, `ishowspeed`, `kai`) or the approved roster.
+- [ ] **Blocked streamers rejected** — explicitly blocked/removed streamers (`botez`, `xqc`, `jynxzi`, `adinross`) are rejected.
 
 ## 7. Visibility & Draft Prevention
 
-- [ ] **Visibility set to Public** — the `Public` radio button was clicked in the YouTube Studio upload wizard before hitting Publish.
-- [ ] **Post-upload verification** — after clicking Publish, navigate back to the YouTube Studio Shorts table and confirm the video row says `Public` (not `Draft`).
-- [ ] **If Draft detected** — immediately attempt to edit the draft to Public. If that also fails, **delete the draft permanently** to maintain zero-draft policy. Never leave a draft sitting on the channel.
-- [ ] **On error, discard the upload dialog** — if any exception occurs mid-upload, click "Discard draft" so no orphan draft is created.
+- [ ] **Visibility set to Public** — uploaded and published directly as Public.
+- [ ] **Post-upload verification** — confirm the video row status is Public.
+- [ ] **Zero Drafts Policy** — if a video remains in Draft, immediately attempt to publish or permanently delete it. Zero drafts permitted in YouTube Studio.
+- [ ] **Discard on error** — if an error occurs mid-upload, discard the draft to prevent abandoned drafts.
 
-## 8. Upload Timing & Queue Discipline
+## 8. Upload Cadence & Schedule
 
-- [ ] **Respect cooldown** — virality ≥ 95: wait 3–4 minutes between uploads. Virality < 95: wait 50–100 minutes.
-- [ ] **One at a time** — only one video is being uploaded at any given moment. The next clip stays local until the current upload is fully verified as Public.
-- [ ] **Daily limit awareness** — if YouTube returns "Daily upload limit reached", stop all uploads and sleep for 1 hour before retrying. Do not spam retries.
+- [ ] **2-2-2 Peak Virality Schedule** (6 videos/day total for US & Canada EST audience):
+  - **Slot 1 (Early Morning)**: 05:30 – 07:00 EST (2 videos, ~35 min apart)
+  - **Slot 2 (Midday / Lunch)**: 13:00 – 14:30 EST (2 videos, ~35 min apart)
+  - **Slot 3 (Prime Night)**: 22:00 – 23:30 EST (2 videos, ~35 min apart)
+- [ ] **Selection Rule** — unuploaded clips selected strictly by highest calibrated virality score first, interleaving streamers to prevent audience fatigue.
 
 ## 9. No Duplicates
 
-- [ ] **Pre-upload channel audit** — before opening the upload dialog, scan the YouTube Studio video table for any row whose title matches this clip. If found as Public, skip (already uploaded). If found as Draft, delete the draft first, then proceed.
-- [ ] **DB cross-check** — the clip's `workflow_meta.uploaded` must be `null` or `false`. If `true`, skip.
+- [ ] **Pre-upload channel audit** — scan YouTube Studio video table for duplicates before uploading.
+- [ ] **DB cross-check** — clip `workflow_meta.uploaded` must not be already true.
 
-## 10. Metadata Embedding
+## 10. Storage & Retention
 
-- [ ] **ffmpeg metadata strip** — `strip_and_embed_video_metadata()` was called to remove all previous encoder metadata (`-map_metadata -1`) before upload, keeping file headers clean.
+- [ ] **Storage Ceiling** — maximum 10.0 GB disk footprint.
+- [ ] **48-Hour Retention** — clips and database event records older than 48 hours are automatically pruned.
+- [ ] **Metadata Embedding** — prior encoder metadata stripped (`-map_metadata -1`) before upload.
 
 ---
 
-> **Rule of thumb:** If any single item above cannot be verified as ✅, the clip does **not** go to YouTube. It stays on the local disk, an error is logged with the specific failed check, and the worker moves on to the next clip.
+> **Rule of thumb:** If any single item above cannot be verified as ✅, the clip does **not** go to YouTube. It stays on local disk, an error is logged with the specific failed check, and the worker moves to the next candidate.

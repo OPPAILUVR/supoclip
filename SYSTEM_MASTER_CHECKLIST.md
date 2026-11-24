@@ -1,6 +1,6 @@
 # SYSTEM MASTER CHECKLIST & OPERATIONAL SPECIFICATION
 **SupoClip Production Engine — Absolute Ground Truth Rules**
-*Last Updated: 2026-11-23 | Audit Cycle: Every 3 Hours*
+*Last Updated: 2026-11-24 | Audit Cycle: Every 3 Hours*
 
 ---
 
@@ -13,35 +13,38 @@
 | **1.3** | **Content-Grounded Title** | Must describe specific on-screen action (Who + What happened). Zero generic clickbait. Must end with `#shorts`. Must be unique in the database. | **BLOCK UPLOAD**. Regenerate title. |
 | **1.4** | **Frame-0 Inverted Hook** | First 1.5s (0–45 frames) MUST contain peak visual action or emotional explosion. Absolute ban on 5–15s dead-air pre-rolls or silent introductions. | **RE-RENDER**. Trim dead-air to frame 0. |
 | **1.5** | **Zero Drafts Policy** | Videos MUST publish directly to `Public`. If a video lands in `Draft`, the uploader must immediately publish it or permanently delete it within the same session. Zero drafts permitted in YouTube Studio. | **AUTO-PURGE**. Delete draft immediately. |
-| **1.6** | **Audio & Video Integrity** | File must have valid moov atom, active H.264 video stream, active AAC audio stream (zero-audio clips strictly banned), duration 30.0s to 59.9s (vertical 9:16). | **BLOCK UPLOAD**. Demux inspection failure. |
+| **1.6** | **Audio & Video Integrity** | File must have valid moov atom, active H.264 video stream, active AAC audio stream (zero-audio clips strictly banned), duration 30.0s to 175.0s (vertical 9:16). | **BLOCK UPLOAD**. Demux inspection failure. |
 
 ---
 
-## 2. MULTI-STREAMER FAIR DISPATCH & CADENCE RULES
+## 2. FORMAT STANDARDS & USER SELECTION
 
-| Virality Tier | Streamer Scenario | Cooldown Gap | Daily Cap | Dispatch Priority |
+- **Dual Embedded Formats (Configurable Per Streamer)**:
+  1. **40/60 Split (`40_60`)**: Facecam Top 40% ($1080 \times 760\text{px}$, Lanczos + unsharp 0.6) + Gameplay Bottom 60% ($1080 \times 1160\text{px}$, Lanczos), zero gap seamless vstack. Subtitle position $Y = 0.85$.
+  2. **Top-Down Blur (`crop`)**: Centered 16:9 stream overlay with 6% horizontal and 1% vertical edge crop over ambient blurred background canvas ($1080 \times 1920\text{px}$, `boxblur=25:5`). Subtitle position $Y = 0.80$.
+- **Dynamic Context Duration**: Strict minimum 30.0s, dynamically extending up to 175.0s to capture complete narrative context, rants, debates, and punchlines without premature cuts.
+
+---
+
+## 3. 2-2-2 PEAK VIRALITY SLOT DISPATCH SCHEDULE
+
+Optimized specifically for US & Canada audiences (EST timezone):
+
+| Slot | Time Window (EST) | Target Uploads | Spacing | Selection Rule |
 |---|---|---|---|---|
-| **Tier 1: Unicorn ($\ge 98$)** | Any Streamer | Instant (0–1 min) | **Bypasses daily caps** | Absolute top priority. Preempts all queues. |
-| **Tier 2: Ultra-Viral ($\ge 95$)** | Multiple Streamers Active | 3–4 minutes | **Max 2 clips/day per streamer** | Alternating interleaving (fair-share round-robin). |
-| **Tier 2: Ultra-Viral ($\ge 95$)** | Solo Streamer Active (others offline) | 3–4 minutes | **Up to 5 clips/day** | Solo-streamer spillover (unlocked up to 5/day). |
-| **Tier 3: Standard ($< 95$)** | Any Streamer | 50–100 minutes | Remaining daily quota | Strategic prime windows (morning, midday, evening, night). |
+| **Slot 1 (Early Morning)** | 05:30 – 07:00 EST | 2 videos | ~35 minutes apart | Highest calibrated virality score |
+| **Slot 2 (Midday / Lunch)** | 13:00 – 14:30 EST | 2 videos | ~35 minutes apart | Highest calibrated virality score |
+| **Slot 3 (Prime Night)** | 22:00 – 23:30 EST | 2 videos | ~35 minutes apart | Highest calibrated virality score |
+
+Total: **6 standout videos per day**, interleaving streamers to prevent audience fatigue.
 
 ---
 
-## 3. SENSORY PHYSICS & VIRALITY SCORING MATRIX
+## 4. STORAGE & RETENTION SPECIFICATION
 
-- **Optical Flow Motion Vector (Frames 0–45)**: Measures pixel velocity in first 1.5s. Low motion caps hook score at 10/25.
-- **Facial Shock & Landmark Variance**: Detects mouth-open percentage, eyebrow elevation, and sudden head tilts to identify genuine scream/rage/laughter peaks.
-- **Acoustic Spectral Flux**: Detects sudden dynamic range shifts ($+15$ to $+25\text{ dB}$ bursts) above ambient stream noise floor.
-- **Ronald Unscripted Benchmarks**: Calibrated against 500 top-performing clips ($\ge 1\text{M}$ views) targeting $>80\%$ Stayed to Watch and $>90\%$ Average Percentage Viewed (AVD).
-
----
-
-## 4. STORAGE & RESOURCE MANAGEMENT
-
-- **Hard Ceiling**: 10.0 GB maximum media storage across buffers, clips, and cache.
-- **Eviction Threshold**: Triggers automatically at 6.0 GB.
-- **Eviction Hierarchy**: FIFO deletion of oldest buffer chunks and local clips until storage drops safely below 6.0 GB, guaranteeing at least 4.0 GB free disk space at all times.
+- **Ceiling**: 10.0 GB maximum media storage.
+- **Retention Policy**: Automatic 48-hour expiration for completed clips and associated database events.
+- **Buffer Management**: Rolling buffer keeps 20 chunks (60s each, ~20 minutes) during live broadcast; excess chunks purged continuously.
 
 ---
 
@@ -52,5 +55,5 @@ The watchdog worker executes every 3 hours (180 minutes) to verify:
 2. **Thumbnail Verification**: Verifies every video uploaded has an active custom viral thumbnail.
 3. **Description Verification**: Verifies every video has full metadata, attribution, and hashtags.
 4. **Worker Heartbeat**: Verifies `live_stream_worker` and `youtube_upload_worker` are active.
-5. **Storage Check**: Confirms total disk footprint is $<10\text{ GB}$.
+5. **Storage Check**: Confirms total disk footprint is $<10\text{ GB}$ and prunes items older than 48 hours.
 6. **Audit Trail**: Logs results to `SYSTEM_AUDIT_LOG.json` and synchronizes with `AGY_SYSTEM_MEMORY.json`.

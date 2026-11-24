@@ -310,6 +310,28 @@ def detect_streamer_layout(
     # =========================================================================
     # CASE 3: Single Camera / Fullscreen / Just Chatting
     # =========================================================================
-    # Return None so the caller uses a single full 9:16 frame (never duplicating the video)
+    # If the streamer is full-screen on camera (large face >= 16% screen height,
+    # or centered face), crop directly to 9:16 vertical centered on their face.
+    # Works universally for ANY streamer in Just Chatting / fullscreen cam mode.
+    # =========================================================================
+    if primary["h_frac"] >= 0.16 and 0.20 <= primary["cx_frac"] <= 0.80:
+        crop_w = round_to_even(int(height * 9 / 16))
+        crop_x = clamp_even(int(primary["cx"] - crop_w // 2), 0, width - crop_w)
+        video_filter = (
+            f"[0:v]crop={crop_w}:{height}:{crop_x}:0,"
+            f"scale={OUT_W}:{OUT_H}:flags=lanczos,unsharp=lx=3:ly=3:la=0.5,setsar=1[vout]"
+        )
+        caption_y = 0.82
+        logger.info(
+            "Configured Universal Fullscreen 9:16 Layout: crop %dx%d at %d,0 centered on face at x=%d, caption_y=%.2f",
+            crop_w, height, crop_x, int(primary["cx"]), caption_y
+        )
+        return {
+            "video_filter": video_filter,
+            "mode": "complex",
+            "caption_y": caption_y,
+            "layout_type": "fullscreen_vertical",
+        }
+
     logger.info("Single camera / full-screen broadcast detected (no split separation needed).")
     return None

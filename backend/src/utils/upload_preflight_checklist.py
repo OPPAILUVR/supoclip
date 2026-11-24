@@ -18,6 +18,7 @@ Checklist sections:
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -27,6 +28,27 @@ logger = logging.getLogger("PreflightChecklist")
 # ─── Section 6: Approved streamers (ONLY these are allowed) ───
 APPROVED_STREAMERS = {"ishowspeed", "asmong", "asmongold", "kai", "kaicenat", "caseoh", "caseoh_"}
 BLOCKED_STREAMERS = {"botez", "xqc", "jynxzi", "adinross"}
+
+
+def _is_streamer_in_db(streamer_name: str) -> bool:
+    """Check if streamer is an active monitored streamer in PostgreSQL database."""
+    if not streamer_name:
+        return False
+    try:
+        import psycopg2
+        db_url = os.environ.get("DATABASE_URL", "postgresql://luv@localhost:5432/supoclip")
+        clean_url = db_url.replace("+asyncpg", "")
+        conn = psycopg2.connect(clean_url, connect_timeout=3)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM live_streamers WHERE is_active = true AND (LOWER(name) = %s OR LOWER(channel_handle) LIKE %s)",
+                (streamer_name.lower(), f"%{streamer_name.lower()}%")
+            )
+            found = cur.fetchone() is not None
+        conn.close()
+        return found
+    except Exception:
+        return False
 
 
 class CheckResult:
@@ -187,8 +209,8 @@ def run_preflight(
     # ═══════════════════════════════════════════════════════════════════
 
     streamer = (clip.get("workflow_meta") or {}).get("streamer", "").lower().strip()
-    streamer_approved = streamer in APPROVED_STREAMERS
     streamer_blocked = streamer in BLOCKED_STREAMERS
+    streamer_approved = (streamer in APPROVED_STREAMERS) or _is_streamer_in_db(streamer)
 
     if streamer_blocked:
         results.append(CheckResult("Allowed Streamers", "Streamer is on the approved list", False,

@@ -109,6 +109,7 @@ async def process_single_streamer(s: Any) -> None:
                     task_id=task_id,
                     buffer_minutes=s.buffer_minutes,
                     audio_url=probe.get("audio_url"),
+                    clip_format=getattr(s, "clip_format", "40_60") or "40_60",
                 )
 
                 await LiveStreamService.record_event(
@@ -155,6 +156,7 @@ async def process_single_streamer(s: Any) -> None:
                     task_id=task_id,
                     buffer_minutes=s.buffer_minutes,
                     audio_url=probe.get("audio_url"),
+                    clip_format=getattr(s, "clip_format", "40_60") or "40_60",
                 )
 
                 # Maintain full 20-minute rolling buffer (20 chunks, 60s each) for rich context and topic-shift detection
@@ -219,11 +221,11 @@ async def run_live_stream_monitor_cycle() -> None:
     if not streamers:
         return
 
-    # Automatically purge orphaned stream buffers and enforce global 10GB quota
+    # Automatically purge orphaned stream buffers and prune clips older than 48 hours
     try:
-        await asyncio.to_thread(LiveStreamService.cleanup_orphaned_buffers)
+        await LiveStreamService.cleanup_orphaned_buffers_async(max_age_hours=48)
     except Exception as clean_err:
-        logger.warning("Periodic buffer cleanup notice: %s", clean_err)
+        logger.warning("Periodic 48h clip cleanup notice: %s", clean_err)
 
     logger.debug("Executing simultaneous live analysis across %d active streamers...", len(streamers))
 

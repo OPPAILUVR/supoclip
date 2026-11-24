@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,7 +27,7 @@ from ..database import AsyncSessionLocal
 from ..ai import AntigravityDirectModel
 from ..media.reframing import build_vertical_filter_plan, render_reframed_clip_ffmpeg
 from ..media.streamer_layout import detect_streamer_layout
-from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filter_fragment, ffmpeg_escape_filter_path
+from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filter_fragment, ffmpeg_escape_filter_path, clamp_even, round_to_even
 from ..utils.motion_analyzer import analyze_visual_actions
 from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
 from ..utils.sensory_analyzer import SensoryAnalyzer
@@ -79,6 +79,8 @@ class ActiveLiveSession:
     is_running: bool = True
     last_analyzed_segment: int = 0
     analyzed_timestamps: set[str] = field(default_factory=set)
+    last_clipped_time: float = 0.0
+    clip_format: str = "40_60"
 
 
 # Active background streaming sessions: streamer_id -> ActiveLiveSession
@@ -578,6 +580,7 @@ class LiveStreamService:
         identifier: str,
         buffer_minutes: int = 20,
         min_virality_score: int = 75,
+        clip_format: str = "40_60",
     ) -> Dict[str, Any]:
         """Add a streamer to the watch list."""
         channel_url, handle = LiveStreamService.normalize_streamer_url(platform, identifier)
@@ -596,11 +599,13 @@ class LiveStreamService:
                 INSERT INTO live_streamers (
                     id, user_id, name, platform, channel_url, channel_handle,
                     is_live, current_stream_title, current_stream_url, current_stream_id,
-                    last_checked_at, last_live_at, is_active, buffer_minutes, min_virality_score
+                    last_checked_at, last_live_at, is_active, buffer_minutes, min_virality_score,
+                    clip_format
                 ) VALUES (
                     :id, :user_id, :name, :platform, :channel_url, :handle,
                     :is_live, :title, :stream_url, :stream_id,
-                    :now, :last_live, true, :buffer_minutes, :min_virality_score
+                    :now, :last_live, true, :buffer_minutes, :min_virality_score,
+                    :clip_format
                 )
             """),
             {
@@ -618,6 +623,7 @@ class LiveStreamService:
                 "last_live": now if is_live else None,
                 "buffer_minutes": buffer_minutes,
                 "min_virality_score": min_virality_score,
+                "clip_format": clip_format,
             },
         )
         await db.commit()
@@ -637,6 +643,7 @@ class LiveStreamService:
             "current_stream_title": title,
             "buffer_minutes": buffer_minutes,
             "min_virality_score": min_virality_score,
+            "clip_format": clip_format,
             "is_active": True,
         }
 
@@ -670,11 +677,37 @@ class LiveStreamService:
                 "is_active": r.is_active,
                 "buffer_minutes": r.buffer_minutes,
                 "min_virality_score": r.min_virality_score,
+                "clip_format": getattr(r, "clip_format", "40_60") or "40_60",
                 "clip_count": r.clip_count,
                 "last_checked_at": r.last_checked_at.isoformat() if r.last_checked_at else None,
                 "last_live_at": r.last_live_at.isoformat() if r.last_live_at else None,
             })
         return streamers
+
+    @staticmethod
+    async def update_streamer_format(db: AsyncSession, user_id: str, streamer_id: str, clip_format: str) -> bool:
+        """Update the clipping format preference (40_60 vs crop) for a streamer."""
+        res = await db.execute(
+            text("""
+                UPDATE live_streamers
+                SET clip_format = :clip_format,
+                    updated_at = :now
+                WHERE id = :id AND user_id = :user_id
+            """),
+            {
+                "id": streamer_id,
+                "user_id": user_id,
+                "clip_format": clip_format,
+                "now": datetime.now(timezone.utc),
+            },
+        )
+        await db.commit()
+        # Also update active in-memory session if currently recording
+        with _sessions_lock:
+            if streamer_id in _active_sessions:
+                _active_sessions[streamer_id].clip_format = clip_format
+                logger.info("Updated active live session %s clip_format to %s", streamer_id, clip_format)
+        return res.rowcount > 0
 
     @staticmethod
     async def delete_streamer(db: AsyncSession, user_id: str, streamer_id: str) -> bool:
@@ -790,6 +823,7 @@ class LiveStreamService:
         task_id: str,
         buffer_minutes: int = 20,
         audio_url: Optional[str] = None,
+        clip_format: str = "40_60",
     ) -> ActiveLiveSession:
         """Start rolling FFmpeg capture into 60s segments.
         
@@ -818,6 +852,7 @@ class LiveStreamService:
                         pass
                 else:
                     existing.task_id = task_id
+                    existing.clip_format = clip_format
                     return existing
 
             # Clean any stale dead process if present
@@ -893,11 +928,11 @@ class LiveStreamService:
                 buffer_dir=stream_buffer_dir,
                 process=proc,
                 is_running=True,
+                clip_format=clip_format,
             )
             _active_sessions[streamer_id] = session
             return session
 
-    @staticmethod
     @staticmethod
     def stop_buffer_recording(streamer_id: str) -> None:
         """Gracefully terminate buffer recording and purge temporary chunks."""
@@ -951,22 +986,13 @@ class LiveStreamService:
         return sorted(buffer_dir.glob("chunk_*.mp4"))
 
     @staticmethod
-    def cleanup_orphaned_buffers() -> int:
+    def cleanup_orphaned_buffers(max_age_hours: int = 48) -> int:
         """
-        AUTOMATIC 10 GB STORAGE QUOTA ENFORCER:
-        Strictly enforces the user's 10 GB storage ceiling across ALL media files:
-        - BUFFER_DIR: /uploads/live_buffers (rolling live stream chunks)
-        - CLIPS_DIR: /clips (rendered clips & thumbnails)
-        - UPLOADS_DIR: /uploads/clips & /uploads/youtube-cache
-
-        EVICTION HIERARCHY (FIFO + Pruning):
-        1. Purges dead/orphaned streamer buffer folders.
-        2. Calculates combined media footprint.
-        3. If total media storage exceeds 10 GB:
-           - Automatically evicts oldest rendered clips & thumbnails in CLIPS_DIR (FIFO).
-           - Automatically evicts oldest inactive buffer segments in BUFFER_DIR (FIFO).
-           - Safely stops when storage drops down to target (6 GB), keeping 4 GB free.
-        Returns the total number of freed bytes.
+        48-HOUR RETENTION & ORPHANED BUFFER PRUNER (Skipping size-based threshold):
+        1. Purges dead/orphaned streamer buffer folders in BUFFER_DIR.
+        2. Prunes all rendered clips & thumbnails in CLIPS_DIR older than 48 hours.
+        3. Prunes temporary public test renders in FRONTEND_PUBLIC older than 48 hours.
+        Returns total number of freed bytes.
         """
         freed_bytes = 0
 
@@ -985,75 +1011,87 @@ class LiveStreamService:
                     except Exception as e:
                         logger.warning("Could not purge orphaned buffer %s: %s", item, e)
 
-        # 2. Enforce global 10 GB quota across CLIPS_DIR + BUFFER_DIR
+        # 2. Prune clips older than max_age_hours (48 hours)
         try:
-            MAX_STORAGE_BYTES = 10 * 1024 * 1024 * 1024       # 10 GB hard limit
-            TARGET_STORAGE_BYTES = int(6.0 * 1024 * 1024 * 1024) # 6 GB target after auto-eviction
+            max_age_seconds = max_age_hours * 3600
+            now_ts = time.time()
+            cutoff_ts = now_ts - max_age_seconds
 
-            media_dirs = [CLIPS_DIR, BUFFER_DIR]
-            existing_dirs = [d for d in media_dirs if d.exists()]
-
-            all_files = []
-            for d in existing_dirs:
-                for f in d.rglob("*"):
-                    if f.is_file() and not f.name.startswith("."):
+            deleted_count = 0
+            if CLIPS_DIR.exists():
+                for fpath in CLIPS_DIR.iterdir():
+                    if fpath.is_file() and not fpath.name.startswith("."):
                         try:
-                            all_files.append((f.stat().st_mtime, f.stat().st_size, f))
+                            if fpath.stat().st_mtime < cutoff_ts:
+                                file_size = fpath.stat().st_size
+                                fpath.unlink(missing_ok=True)
+                                freed_bytes += file_size
+                                deleted_count += 1
+                        except Exception as del_err:
+                            logger.debug("Failed deleting expired clip %s: %s", fpath, del_err)
+
+            # Prune temporary test clips in frontend/public older than 48 hours
+            public_dir = Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "public"
+            if public_dir.exists():
+                for pat in ("asmon_*.mp4", "caseoh_*.mp4", "test_*.mp4"):
+                    for fpath in public_dir.glob(pat):
+                        try:
+                            if fpath.stat().st_mtime < cutoff_ts:
+                                file_size = fpath.stat().st_size
+                                fpath.unlink(missing_ok=True)
+                                freed_bytes += file_size
+                                deleted_count += 1
                         except Exception:
                             pass
 
-            total_size = sum(size for _, size, _ in all_files)
-
-            if total_size > MAX_STORAGE_BYTES:
-                logger.warning(
-                    "⚠️ TOTAL STORAGE (%.2f GB) EXCEEDS 10 GB LIMIT! Starting automatic FIFO eviction...",
-                    total_size / (1024 * 1024 * 1024),
-                )
-
-                # Clean analysis caches first
-                for active_id in active_ids:
-                    LiveStreamService.clean_analysis_artifacts(BUFFER_DIR / active_id / "analysis")
-
-                # Collect files to consider for eviction (oldest first)
-                # For CLIPS_DIR: all clips and thumbnails are eligible for FIFO deletion
-                # For BUFFER_DIR: preserve the latest recording chunk so live streams are not interrupted
-                active_recording_chunks = set()
-                if BUFFER_DIR.exists():
-                    for s_dir in [d for d in BUFFER_DIR.iterdir() if d.is_dir()]:
-                        dir_chunks = sorted(s_dir.glob("chunk_*.mp4"))
-                        if dir_chunks:
-                            active_recording_chunks.add(dir_chunks[-1])
-
-                candidates = []
-                for mtime, size, fpath in all_files:
-                    if fpath in active_recording_chunks:
-                        continue
-                    candidates.append((mtime, size, fpath))
-
-                # Sort oldest first (FIFO)
-                candidates.sort(key=lambda x: x[0])
-
-                current_size = total_size
-                deleted_count = 0
-                for _, size, fpath in candidates:
-                    if current_size <= TARGET_STORAGE_BYTES:
-                        break
-                    try:
-                        fpath.unlink(missing_ok=True)
-                        current_size -= size
-                        freed_bytes += size
-                        deleted_count += 1
-                    except Exception as del_err:
-                        logger.debug("Failed deleting file %s: %s", fpath, del_err)
-
+            if deleted_count > 0:
                 logger.info(
-                    "✅ Automated storage eviction complete: deleted %d files, freed %.2f GB. Current storage: %.2f GB (under 10GB limit).",
+                    "✅ 48-Hour Clip Retention: pruned %d expired clip files (freed %.2f MB).",
                     deleted_count,
-                    freed_bytes / (1024 * 1024 * 1024),
-                    current_size / (1024 * 1024 * 1024),
+                    freed_bytes / (1024 * 1024),
                 )
         except Exception as e:
-            logger.warning("Error enforcing 10 GB storage quota: %s", e)
+            logger.warning("Error in 48-hour clip pruning: %s", e)
+
+        return freed_bytes
+
+    @staticmethod
+    async def cleanup_orphaned_buffers_async(max_age_hours: int = 48) -> int:
+        """
+        Async pruner: Executes file system pruning in thread and prunes matching database rows older than 48 hours.
+        """
+        freed_bytes = await asyncio.to_thread(LiveStreamService.cleanup_orphaned_buffers, max_age_hours)
+
+        try:
+            async with AsyncSessionLocal() as db:
+                cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+                await db.execute(
+                    text("DELETE FROM live_stream_events WHERE created_at < :cutoff"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.execute(
+                    text("DELETE FROM clip_exports WHERE created_at < :cutoff"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.execute(
+                    text("DELETE FROM social_posts WHERE created_at < :cutoff"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.execute(
+                    text("DELETE FROM generated_clips WHERE created_at < :cutoff"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.execute(
+                    text("DELETE FROM task_processing_checkpoints WHERE updated_at < :cutoff"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.execute(
+                    text("DELETE FROM tasks WHERE created_at < :cutoff AND workflow = 'highlights'"),
+                    {"cutoff": cutoff_dt},
+                )
+                await db.commit()
+        except Exception as db_err:
+            logger.warning("Database 48h pruning notice: %s", db_err)
 
         return freed_bytes
 
@@ -1263,6 +1301,19 @@ Respond ONLY with a JSON array of 5 unique, catchy title strings:
         analysis_dir: Path,
     ) -> List[Dict[str, Any]]:
         """Internal moment evaluation routine."""
+        # Strict Anti-Spam Pacing Gate:
+        # Require at least 10 minutes (600 seconds) between clips for the same streamer.
+        # This prevents spamming back-to-back clips and guarantees only standout moments are produced.
+        MIN_CLIP_COOLDOWN_SECONDS = 600
+        now_ts = time.time()
+        if session.last_clipped_time and (now_ts - session.last_clipped_time) < MIN_CLIP_COOLDOWN_SECONDS:
+            logger.debug(
+                "Pacing cooldown active for %s (last clip created %d seconds ago); waiting for next window",
+                session.streamer_name,
+                int(now_ts - session.last_clipped_time),
+            )
+            return []
+
         # Get completed chunks (excluding the currently active recording file)
         chunks = sorted(session.buffer_dir.glob("chunk_*.mp4"))
         if len(chunks) < 2:
@@ -1453,19 +1504,15 @@ Every single title MUST be completely unique, novel, and specific to what actual
    - DO NOT repeat, closely resemble, or copy any of these recently used titles:
 {recent_titles_clause}
 
-2. CATCHY, HIGH-CTR PSYCHOLOGICAL FORMULAS (MUST BE IRRESISTIBLY CLICK-FORCING):
-   - Your title MUST force scrolling viewers to stop dead in their tracks using the CURIOSITY GAP.
-   - Pique high emotional stakes, disbelief, unexpected drama, or an unresolved question that ONLY watching the video answers.
-   - Use high-stakes, active verbs (e.g. Exposed, Silenced, Regretted, Snapped, Backfired, Confessed, Blundered).
-   - Mention "{session.streamer_name}" or the specific person/subject in the clip. NEVER generate random words or dry descriptive summaries.
-   - Winning archetypes to adapt dynamically:
-     * When {session.streamer_name} Realized The [Specific Topic/Blunder]
-     * {session.streamer_name} Reacts To The Wildest [Topic/Claim]
-     * The Exact Moment [Specific Event/Accusation] Happened
-     * Chat Completely Stunned {session.streamer_name} With This
-     * Why {session.streamer_name} Had To Speak Out About [Topic]
-     * {session.streamer_name} Dropped An Unfiltered Confession Live
-   - Introduce an intense curiosity gap without spoiling the outcome.
+2. NATURAL, RETENTION-FOCUSED TITLES (DERIVED DIRECTLY FROM THE CLIP CONTENT):
+   - Summarize the real topic, debate, or funny incident with natural phrasing.
+   - Good examples:
+     * Asmongold on Chipotle Destroying His Tongue
+     * CaseOh Loses It At Broken Elevator
+     * Asmongold Calls Out Fake Tech Benchmarks
+     * CaseOh Screams After Unexpected Jumpscare
+   - FORBIDDEN PREFIXES: DO NOT start titles with 'The Exact Moment...', 'When X Realized...', or 'X Dropped An Unfiltered...'. These sound like automated bot spam.
+   - Mention "{session.streamer_name}" naturally.
 
 3. STRICT LENGTH: 3 TO 7 WORDS ONLY.
    - Viewers scroll past long sentences in 0.4s. Keep it punchy, visceral, and readable at a glance.
@@ -1559,6 +1606,14 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 calibrated_score = int(round((score * 0.6) + (sensory_metrics.get("composite_sensory_score", 50.0) * 0.4)))
                 score = min(100, max(0, calibrated_score))
                 moment["virality_score"] = score
+                if score < min_virality:
+                    logger.info(
+                        "Moment '%s' calibrated score %d is below min_virality %d; skipping",
+                        moment.get("hook_title"),
+                        score,
+                        min_virality,
+                    )
+                    continue
             except Exception as sensory_err:
                 logger.warning("Sensory analysis fallback for %s: %s", session.streamer_name, sensory_err)
 
@@ -1608,20 +1663,16 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
             # -----------------------------------------------------------
             # Step 2: Streamer Layout Format (1080x1920)
             # Detect corner facecam (40/60 format) or side-by-side stream layout.
-            # Falls back to ambient blurred canvas format if single-camera/fullscreen.
+            # Probes actual stream resolution dynamically (720p/900p/1080p).
+            # Never creates blurred letterbox canvas.
             # -----------------------------------------------------------
-            streamer_layout = detect_streamer_layout(temp_source, 1920, 1080)
-            if streamer_layout:
-                video_filter = streamer_layout["video_filter"]
-                mode = streamer_layout["mode"]
-                caption_y = streamer_layout.get("caption_y", 0.80)
-                logger.info(
-                    "Applied %s layout for %s (caption_y=%.2f)",
-                    streamer_layout.get("layout_type", "custom"),
-                    session.streamer_name,
-                    caption_y,
-                )
-            else:
+            src_w, src_h = ffprobe_video_size(temp_source)
+            logger.info("Source video dimensions for %s: %dx%d", session.streamer_name, src_w, src_h)
+
+            streamer_layout = detect_streamer_layout(temp_source, src_w, src_h)
+
+            if getattr(session, "clip_format", "40_60") == "crop":
+                # Previous crop format: blurred ambient canvas with scaled foreground
                 video_filter = (
                     "[0:v]split=2[bgsrc][fgsrc];"
                     "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg];"
@@ -1630,8 +1681,45 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 )
                 mode = "complex"
                 caption_y = 0.80
+                logger.info("Applied previous Crop format (ambient canvas) for %s (caption_y=0.80)", session.streamer_name)
+            elif streamer_layout:
+                video_filter = streamer_layout["video_filter"]
+                mode = streamer_layout["mode"]
+                caption_y = streamer_layout.get("caption_y", 0.85)
                 logger.info(
-                    "Applying ambient blurred canvas format with 6%% side crop (1%% top/bottom) for %s (caption_y=0.80)",
+                    "Applied %s layout for %s (caption_y=%.2f)",
+                    streamer_layout.get("layout_type", "custom"),
+                    session.streamer_name,
+                    caption_y,
+                )
+            else:
+                # Deterministic 40/60 vertical split fallback:
+                # Top 40% (1080x760) facecam + Bottom 60% (1080x1160) gameplay, zero gap!
+                corner = "top_right"
+                top_h = 760
+                bottom_h = 1160
+                cam_w = round_to_even(int(src_w * 0.35))
+                cam_h = round_to_even(int(cam_w * top_h / 1080))
+                cam_x = 0 if corner == "top_left" else (src_w - cam_w)
+                cam_y = clamp_even(int(src_h * 0.03), 0, src_h - cam_h)
+
+                game_h = src_h
+                game_w = round_to_even(int(game_h * 1080 / bottom_h))
+                game_x = clamp_even((src_w - game_w) // 2, 0, src_w - game_w)
+
+                video_filter = (
+                    f"[0:v]split=2[camsrc][gamesrc];"
+                    f"[camsrc]crop={cam_w}:{cam_h}:{cam_x}:{cam_y},"
+                    f"scale=1080:{top_h}:flags=lanczos,unsharp=lx=3:ly=3:la=0.6,setsar=1[top];"
+                    f"[gamesrc]crop={game_w}:{game_h}:{game_x}:0,"
+                    f"scale=1080:{bottom_h}:flags=lanczos,setsar=1[bottom];"
+                    f"[top][bottom]vstack=inputs=2[vout]"
+                )
+                mode = "complex"
+                caption_y = 0.85
+                logger.info(
+                    "Applied deterministic 40/60 vertical layout (%s webcam) for %s (caption_y=0.85)",
+                    corner,
                     session.streamer_name,
                 )
 
@@ -1699,21 +1787,14 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 subprocess.run(render_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             except subprocess.CalledProcessError as render_exc:
                 logger.warning(
-                    "Face-aware render failed for %s (rc=%s), retrying with blurred-bg fit: %s",
+                    "Subtitle burn render failed for %s (rc=%s): %s. Rendering clean vertical layout without burned subs...",
                     session.streamer_name, render_exc.returncode,
-                    (render_exc.stderr or "")[-500:],
-                )
-                # Retry with safe blurred-bg fit (with 6% side crop and 1% top/bottom crop)
-                safe_filter = (
-                    "[0:v]split=2[bgsrc][fgsrc];"
-                    "[bgsrc]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];"
-                    "[fgsrc]crop=trunc(iw*0.88/2)*2:trunc(ih*0.98/2)*2:trunc(iw*0.06/2)*2:trunc(ih*0.01/2)*2,scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{subs_frag}[vout]"
+                    (render_exc.stderr or "")[-300:],
                 )
                 retry_cmd = [
                     _ffmpeg_path(), "-y",
                     "-i", str(temp_source),
-                    "-filter_complex", safe_filter,
+                    "-filter_complex", video_filter,
                     "-map", "[vout]",
                 ]
                 if has_audio:
@@ -1846,6 +1927,9 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 )
 
             logger.info("Successfully generated live clip: %s (Virality %s)", clip_filename, score)
+            session.last_clipped_time = time.time()
             generated_clips.append({"clip_id": clip_id, "filename": clip_filename, **moment})
+            # Anti-Spam Gate: Produce at most 1 clip per evaluation window
+            break
 
         return generated_clips

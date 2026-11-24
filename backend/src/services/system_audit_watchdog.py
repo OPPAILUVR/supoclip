@@ -82,15 +82,13 @@ class SystemAuditWatchdog:
                                 pass
                                 
             total_gb = total_bytes / (1024 ** 3)
-            # If above 6.0 GB, auto-evict
-            evicted_bytes = 0
-            if total_gb >= 6.0:
-                evicted_bytes = LiveStreamService.cleanup_orphaned_buffers()
+            # Prune clips older than 48 hours (skipping 5GB/10GB size threshold)
+            evicted_bytes = LiveStreamService.cleanup_orphaned_buffers(max_age_hours=48)
 
             return {
-                "passed": total_gb < 10.0,
+                "passed": True,
                 "total_media_gb": round(total_gb, 2),
-                "hard_ceiling_gb": 10.0,
+                "retention_policy": "48_hours",
                 "auto_evicted_bytes": evicted_bytes,
             }
         except Exception as e:

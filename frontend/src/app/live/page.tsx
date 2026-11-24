@@ -31,6 +31,7 @@ interface Streamer {
   buffer_minutes: number;
   min_virality_score: number;
   clip_count: number;
+  clip_format?: "40_60" | "crop";
   last_checked_at?: string;
   last_live_at?: string;
 }
@@ -67,6 +68,7 @@ export default function LiveStreamPage() {
   const [identifier, setIdentifier] = useState("");
   const [bufferMinutes, setBufferMinutes] = useState(10);
   const [minVirality, setMinVirality] = useState(75);
+  const [clipFormat, setClipFormat] = useState<"40_60" | "crop">("40_60");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -160,6 +162,7 @@ export default function LiveStreamPage() {
           identifier: identifier.trim(),
           buffer_minutes: bufferMinutes,
           min_virality_score: minVirality,
+          clip_format: clipFormat,
         }),
       });
 
@@ -170,11 +173,33 @@ export default function LiveStreamPage() {
 
       setName("");
       setIdentifier("");
+      setClipFormat("40_60");
       await loadStreamers();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to add streamer");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleUpdateFormat = async (streamerId: string, format: "40_60" | "crop") => {
+    // Optimistic UI update
+    setStreamers((prev) =>
+      prev.map((s) => (s.id === streamerId ? { ...s, clip_format: format } : s))
+    );
+    try {
+      const res = await fetch(`/api/live-streamers/${streamerId}/format`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clip_format: format }),
+      });
+      if (!res.ok) {
+        console.error("Failed to update format upstream:", await res.text());
+        await loadStreamers();
+      }
+    } catch (e) {
+      console.error("Failed to update format:", e);
+      await loadStreamers();
     }
   };
 
@@ -359,6 +384,34 @@ export default function LiveStreamPage() {
                 </div>
               </div>
 
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">Clip Format</label>
+                <div className="mt-1.5 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setClipFormat("40_60")}
+                    className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                      clipFormat === "40_60"
+                        ? "border-red-500 bg-red-500/10 text-red-400 font-bold"
+                        : "border-border text-muted-foreground hover:bg-accent"
+                    }`}
+                  >
+                    40/60 Split
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setClipFormat("crop")}
+                    className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
+                      clipFormat === "crop"
+                        ? "border-red-500 bg-red-500/10 text-red-400 font-bold"
+                        : "border-border text-muted-foreground hover:bg-accent"
+                    }`}
+                  >
+                    Top-Down Blur
+                  </button>
+                </div>
+              </div>
+
               <button
                 type="submit"
                 disabled={submitting}
@@ -446,6 +499,41 @@ export default function LiveStreamPage() {
                         {s.current_stream_title}
                       </div>
                     )}
+
+                    {/* Format Selector */}
+                    <div className="mt-3 flex items-center justify-between rounded-lg bg-background/80 px-2.5 py-1.5 border border-border">
+                      <span className="text-[11px] font-medium text-muted-foreground">Clip Format:</span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleUpdateFormat(s.id, "40_60");
+                          }}
+                          className={`rounded px-2 py-0.5 text-[11px] font-semibold transition ${
+                            (s.clip_format || "40_60") === "40_60"
+                              ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          40/60 Split
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleUpdateFormat(s.id, "crop");
+                          }}
+                          className={`rounded px-2 py-0.5 text-[11px] font-semibold transition ${
+                            s.clip_format === "crop"
+                              ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          Top-Down Blur
+                        </button>
+                      </div>
+                    </div>
 
                     <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-xs text-muted-foreground">
                       <div className="flex items-center gap-3">

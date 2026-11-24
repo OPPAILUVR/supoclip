@@ -1,8 +1,26 @@
 {
-  "system_version": "2.4.0",
-  "last_updated": "2026-11-23T22:20:00Z",
+  "system_version": "2.5.0",
+  "last_updated": "2026-11-24T17:55:00Z",
   "audit_interval_hours": 3,
   "rules": {
+    "clip_formats": {
+      "policy": "user_configurable_per_streamer",
+      "supported_formats": [
+        "40_60",
+        "crop"
+      ],
+      "default_format": "40_60",
+      "format_descriptions": {
+        "40_60": "Facecam Top 40% (1080x760, Lanczos + unsharp) + Gameplay Bottom 60% (1080x1160, Lanczos), Zero Gap",
+        "crop": "Top-Down Ambient Blurred Canvas with 6% horizontal and 1% vertical edge crop on foreground"
+      }
+    },
+    "duration_and_context": {
+      "min_duration_seconds": 30.0,
+      "max_duration_seconds": 175.0,
+      "target_sweet_spot_seconds": 60.0,
+      "rule": "Complete story arc and topic-shift detection without mid-sentence or mid-explanation cuts"
+    },
     "thumbnail": {
       "mandatory": true,
       "color_grade": {
@@ -64,29 +82,19 @@
       "motion_vector_first_45_frames": true
     },
     "cadence_and_fair_share": {
-      "unicorn_98_plus": {
-        "action": "instant_upload",
-        "bypass_daily_caps": true,
-        "cooldown_seconds": 60
-      },
-      "viral_95_plus": {
-        "cooldown_min_seconds": 180,
-        "cooldown_max_seconds": 240,
-        "multi_streamer_daily_cap": 2,
-        "solo_streamer_daily_cap": 5,
-        "dispatch_mode": "alternating_interleaving"
-      },
-      "standard_under_95": {
-        "cooldown_min_seconds": 3000,
-        "cooldown_max_seconds": 6000,
-        "prime_windows": ["morning", "midday", "evening", "night"]
-      }
+      "schedule_type": "2_2_2_slots",
+      "total_daily_uploads": 6,
+      "slots": [
+        {"name": "Early Morning", "window_est": "05:30 - 07:00", "count": 2},
+        {"name": "Midday Lunch", "window_est": "13:00 - 14:30", "count": 2},
+        {"name": "Prime Night", "window_est": "22:00 - 23:30", "count": 2}
+      ],
+      "selection_rule": "Highest calibrated virality score first with alternating streamer interleaving"
     },
     "storage": {
       "hard_ceiling_gb": 10.0,
-      "target_headroom_gb": 4.0,
-      "eviction_trigger_gb": 6.0,
-      "eviction_strategy": "FIFO"
+      "retention_hours": 48,
+      "eviction_strategy": "Auto-purge buffer chunks beyond rolling window; prune clips and database events older than 48 hours."
     }
   }
 }

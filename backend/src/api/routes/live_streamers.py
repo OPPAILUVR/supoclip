@@ -24,10 +24,15 @@ class AddStreamerRequest(BaseModel):
     identifier: str = Field(..., min_length=1, max_length=500, description="Channel handle, URL, or username")
     buffer_minutes: int = Field(default=10, ge=3, le=30)
     min_virality_score: int = Field(default=75, ge=50, le=95)
+    clip_format: str = Field(default="40_60", pattern="^(40_60|crop)$")
 
 
 class ToggleStreamerRequest(BaseModel):
     is_active: bool
+
+
+class UpdateFormatRequest(BaseModel):
+    clip_format: str = Field(..., pattern="^(40_60|crop)$")
 
 
 @router.get("/")
@@ -57,6 +62,7 @@ async def add_streamer(
             identifier=payload.identifier,
             buffer_minutes=payload.buffer_minutes,
             min_virality_score=payload.min_virality_score,
+            clip_format=payload.clip_format,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -78,6 +84,21 @@ async def toggle_streamer(
     if not success:
         raise HTTPException(status_code=404, detail="Streamer not found")
     return {"status": "ok", "is_active": payload.is_active}
+
+
+@router.post("/{streamer_id}/format")
+async def update_streamer_format(
+    streamer_id: str,
+    payload: UpdateFormatRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Update clipping layout format preference for a streamer ('40_60' or 'crop')."""
+    user_id = get_authenticated_user_id(request, get_config())
+    success = await LiveStreamService.update_streamer_format(db, user_id, streamer_id, payload.clip_format)
+    if not success:
+        raise HTTPException(status_code=404, detail="Streamer not found")
+    return {"status": "ok", "clip_format": payload.clip_format}
 
 
 @router.delete("/{streamer_id}")

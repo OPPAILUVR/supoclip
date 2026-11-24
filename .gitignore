@@ -47,3 +47,6 @@ browser_data/
 *.part
 **/temp_video/
 research/ronald_view_jail_study/video.mp4
+research/**/*.mp4
+research/*.mp4
+research/livestreams_memes_study/videos/

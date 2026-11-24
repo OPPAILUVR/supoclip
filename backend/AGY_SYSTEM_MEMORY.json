@@ -1,20 +1,38 @@
 {
-  "system_version": "2.0.0",
+  "system_version": "2.5.0",
   "project_name": "SupoClip Automated Viral Engine",
-  "last_updated": "2026-11-16T16:29:00+05:30",
+  "last_updated": "2026-11-24T17:55:00+05:30",
   "immutable_directives": {
     "model_usage": {
-      "policy": "STRICT_LOCAL_MODELS_ONLY",
-      "gemini_api_tokens": 0,
-      "description": "All transcription, hook analysis, and video processing must run locally unless explicitly instructed otherwise."
+      "policy": "HYBRID_ANTIGRAVITY_AND_LOCAL_WHISPER",
+      "ai_brain": "Antigravity Gemini Flash",
+      "ai_tasks": [
+        "Multi-modal video + speech moment detection",
+        "Topic and story transition detection",
+        "Bespoke curiosity-gap hook title generation",
+        "Calibrated virality scoring"
+      ],
+      "local_transcription": "OpenAI Whisper (base model in-memory cached)"
     },
     "visual_standards": {
-      "crop_format": "AMBIENT_BLURRED_CANVAS",
-      "crop_margins": {
-        "left_crop_percent": 6.0,
-        "right_crop_percent": 6.0,
-        "top_crop_percent": 1.0,
-        "bottom_crop_percent": 1.0
+      "dual_clip_formats_embedded": {
+        "policy": "USER_CONFIGURABLE_PER_STREAMER",
+        "default_format": "40_60",
+        "supported_formats": {
+          "40_60": {
+            "name": "40/60 Split",
+            "top_tile": "Facecam (1080x760, Lanczos + unsharp 0.6)",
+            "bottom_tile": "Gameplay / Content (1080x1160, Lanczos)",
+            "gap": "ZERO_GAP_SEAMLESS",
+            "caption_y": 0.85
+          },
+          "crop": {
+            "name": "Top-Down Blur (Ambient Canvas)",
+            "background": "Scaled to 1080x1920 with boxblur 25:5",
+            "foreground": "Centered stream (6% horizontal crop, 1% vertical crop)",
+            "caption_y": 0.8
+          }
+        }
       },
       "caption_style": {
         "font_family": "Impact",
@@ -23,11 +41,15 @@
         "highlight_active_word_color": "#FFFF00",
         "ass_active_hex": "&H0000FFFF&",
         "entrance_animation": "spring_bounce_pop",
-        "vertical_position_ratio": 0.8,
+        "vertical_position_ratio": 0.85,
         "safe_zone": "above_youtube_shorts_overlays"
       },
-      "target_duration_seconds": 28.0,
-      "max_duration_seconds": 38.0
+      "duration_standards": {
+        "min_duration_seconds": 30.0,
+        "max_duration_seconds": 175.0,
+        "target_sweet_spot_seconds": 60.0,
+        "narrative_rule": "Snaps to natural sentence boundaries without premature cuts. Dynamically captures complete topic and story transitions up to 175s (3-minute YouTube Shorts limit) for storytelling/rants."
+      }
     },
     "thumbnail_generation": {
       "mandatory": true,
@@ -42,20 +64,27 @@
     },
     "youtube_distribution": {
       "publishing_cadence": {
-        "tier_1_instant_95_plus": {
-          "score_threshold": 95,
-          "cooldown_seconds_min": 180,
-          "cooldown_seconds_max": 240,
-          "description": "Clips with score >= 95 MUST be uploaded INSTANTLY with an exact 3 to 4 minute (180-240s) gap between consecutive uploads."
+        "policy": "2_2_2_PEAK_VIRALITY_SLOTS",
+        "target_audience": "US & Canada (EST timezone)",
+        "daily_target_videos": 6,
+        "slots": {
+          "slot_1_early_morning": {
+            "window": "05:30 - 07:00 EST",
+            "videos_to_upload": 2,
+            "spacing_minutes": 35
+          },
+          "slot_2_midday_lunch": {
+            "window": "13:00 - 14:30 EST",
+            "videos_to_upload": 2,
+            "spacing_minutes": 35
+          },
+          "slot_3_prime_night": {
+            "window": "22:00 - 23:30 EST",
+            "videos_to_upload": 2,
+            "spacing_minutes": 35
+          }
         },
-        "tier_2_regular_below_95": {
-          "score_threshold_below": 95,
-          "cooldown_minutes_min": 50,
-          "cooldown_minutes_max": 100,
-          "cooldown_seconds_min": 3000,
-          "cooldown_seconds_max": 6000,
-          "description": "Clips with score < 95 MUST be uploaded RANDOMLY with a 50 to 100 minute (3000-6000s) gap."
-        }
+        "selection_rule": "Highest calibrated virality score first, interleaving streamers to prevent audience fatigue."
       },
       "visibility": "PUBLIC",
       "draft_policy": "NO_ABANDONED_DRAFTS",
@@ -70,19 +99,30 @@
         "tag_dump_prohibited": true
       }
     },
+    "storage_and_retention": {
+      "quota_ceiling_gb": 10.0,
+      "clip_retention_hours": 48,
+      "buffer_rolling_window_chunks": 20,
+      "eviction_strategy": "Purge clips and database events older than 48 hours; purge rolling buffer chunks beyond window."
+    },
     "architecture_pipeline": {
       "worker_1_stream_capture": {
         "module": "src.workers.live_stream_worker",
-        "responsibility": "24/7 stream capture & rolling 10-chunk buffer management. Never blocked by rendering or uploading."
+        "responsibility": "24/7 concurrent parallel stream capture & rolling buffer management across all active streamers."
       },
       "worker_2_ai_engine": {
-        "module": "src.workers.ai_worker / LiveStreamService",
-        "responsibility": "Audio transcription, hook scoring, vertical 9:16 render, dynamic subtitles, thumbnail creation."
+        "module": "src.workers.run_workers / LiveStreamService",
+        "responsibility": "Audio transcription, multimodal CV + speech scoring, vertical 9:16 rendering in chosen format, dynamic subtitles, thumbnail creation."
       },
       "worker_3_youtube_distribution": {
         "module": "src.workers.youtube_upload_worker",
-        "responsibility": "Dedicated YouTube uploader & draft publisher. Always free to publish independently with strict 3-4 min spacing."
+        "responsibility": "Dedicated YouTube uploader adhering strictly to the 2-2-2 EST prime-time virality slots."
       }
+    },
+    "anti_spam_pacing": {
+      "streamer_clip_cooldown_seconds": 600,
+      "max_clips_per_evaluation_cycle": 1,
+      "post_calibration_threshold_enforced": true
     },
     "credential_protection": {
       "protected_paths": [
@@ -93,7 +133,7 @@
     }
   },
   "performance_feedback_loop": {
-    "last_audit_at": "2026-11-24T07:42:42.703870+00:00",
+    "last_audit_at": "2026-11-24T13:43:11.338971+00:00",
     "total_audited_clips": 12,
     "breakout_winners": [],
     "view_jail_30k_pool": [],
@@ -104,11 +144,11 @@
       "facial_reaction_weight": 0.2
     }
   },
-  "last_system_audit": "2026-11-24T07:42:33.554071+00:00",
+  "last_system_audit": "2026-11-24T13:43:05.922936+00:00",
   "last_audit_status": "PASS",
   "audit_summary": {
     "workers": true,
-    "storage_gb": 1.99,
+    "storage_gb": 0.0,
     "drafts_in_studio": 0
   }
 }
