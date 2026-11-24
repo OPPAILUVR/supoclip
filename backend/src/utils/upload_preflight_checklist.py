@@ -127,14 +127,14 @@ def run_preflight(
     results.append(CheckResult("Duration", "Minimum 30 seconds", min_ok,
                                f"{duration:.1f}s" + ("" if min_ok else " — TOO SHORT, rejected")))
 
-    context_ok = 30.0 <= duration <= 58.0
-    results.append(CheckResult("Duration", "Context-appropriate length (30–58s)", context_ok,
+    context_ok = 30.0 <= duration <= 180.0
+    results.append(CheckResult("Duration", "Context-appropriate length (30–180s)", context_ok,
                                f"{duration:.1f}s" + ("" if context_ok else " — outside preferred range (soft warning)")))
-    # Duration 30-58 is a soft check; the hard gate is 30-60.
+    # Duration 30-180s complies with YouTube Shorts official 3-minute limit (expanded Oct 2024).
 
-    shorts_ok = duration < 60.0
-    results.append(CheckResult("Duration", "Under 60 seconds (Shorts limit)", shorts_ok,
-                               f"{duration:.1f}s" + ("" if shorts_ok else " — EXCEEDS 60s, cannot be a Short")))
+    shorts_ok = duration <= 180.0
+    results.append(CheckResult("Duration", "Under 180 seconds (YouTube Shorts 3-min limit)", shorts_ok,
+                               f"{duration:.1f}s" + ("" if shorts_ok else " — EXCEEDS 180s, cannot be a Short")))
 
     # ═══════════════════════════════════════════════════════════════════
     # SECTION 3: Title

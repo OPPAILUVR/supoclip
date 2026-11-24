@@ -321,8 +321,8 @@ def apply_context_preroll_and_postroll(
     end_s: float,
     segments: List[Dict[str, Any]],
     min_duration: float = 30.0,
-    max_duration: float = 58.0,
-    target_sweet_spot: float = 40.0,
+    max_duration: float = 175.0,
+    target_sweet_spot: float = 60.0,
     source_duration: Optional[float] = None,
 ) -> tuple[float, float, float]:
     """
@@ -1391,15 +1391,14 @@ FRAME-BY-FRAME VISUAL & EMOTIONAL ACTIONS:
 UNIVERSAL MULTI-MODAL VIRALITY MATRIX (APPLIES COLLECTIVELY TO ALL STREAMERS & CONTENT):
 This collective intelligence is derived from 500+ top-performing clips across all genres (gaming, IRL, commentary, podcast, chess, comedy, drama). Apply ALL of these dimensions simultaneously regardless of who is on screen:
 
-1. DURATION & CONTEXTUAL STORY ARC (DYNAMIC CONTEXT-BASED, STRICT MIN 30s, FLEXIBLE 30-58s):
+1. DURATION & CONTEXTUAL STORY ARC (DYNAMIC CONTEXT-BASED, STRICT MIN 30s, UP TO 175s FOR STORYTELLING/RANTS):
    - You MUST keep every video ABOVE 30 seconds (strict minimum: 30.0s).
-   - It is NOT necessary or desirable to finish every video at 38 seconds! You can increase or decrease length depending on the video's specific context.
-   - Always check the context of the video and decide the length based on what the viewer needs to fully understand the moment:
-     * Setup & Context (0-8s): Ensure enough lead-in context for the viewer to understand who is speaking, who they are talking to, and what the situation/stakes are. Never start abruptly without context.
-     * Escalation & Midpoint Climax (40-48% mark): The tension, hilarious blunder, or shocking revelation.
-     * Full Resolution & Punchline: Let the streamer complete their full thought, explanation, or reaction. NEVER cut off mid-explanation or mid-sentence.
-   - Adjust duration dynamically between 30 and 58 seconds to capture the complete context.
-   - HARD LIMIT: Never exceed 58.0 seconds (YouTube Shorts 60s limit).
+   - Long-form reaction/storytelling clips (especially Asmongold reaction breakdowns, rants, and debates like @LivestreamsMemes):
+     * Allow clips to run naturally between 60s and 175s (up to 3 minutes) so the complete 4-act story arc unfolds: Setup (0-20s) -> Reaction (5s) -> Monologue/Rant (45-90s) -> Punchline & Payoff (10-15s).
+     * NEVER truncate before the punchline or resolution!
+   - For quick, high-energy clips (sudden blunders, jumpscares), 30 to 60 seconds is fine.
+   - Adjust duration dynamically between 30 and 175 seconds to capture the complete context.
+   - HARD LIMIT: Never exceed 175.0 seconds (YouTube Shorts 3-minute limit).
 
 2. MULTI-MODAL PHYSICAL & VISUAL ACTIONS (CV Optical Flow + Facial Tracking):
    - ACUTE SHOCK & OUTRAGE EMPHASIS: Frame-by-frame cascade data across 1,000 videos proves wide-eyed shock and sudden physical disbelief outperform mild laughter by 9.38x (and 23.3x in top viral tiers). Prioritize high-arousal facial distortion, mouth-open screams, standing up, knocking chairs, violent desk slams, and intense camera stares.
@@ -1519,8 +1518,8 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 end_s=raw_end_s,
                 segments=segments,
                 min_duration=30.0,
-                max_duration=58.0,
-                target_sweet_spot=40.0,
+                max_duration=175.0,
+                target_sweet_spot=60.0,
             )
 
             # Multimodal Sensory Physics Evaluation (Ronald 85%+ Stayed-to-Watch Rule)

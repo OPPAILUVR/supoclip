@@ -884,7 +884,7 @@ class VideoService:
         add_subtitles: bool = True,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         max_short_side: Optional[int] = None,
-        max_clip_seconds: float = 60.0,
+        max_clip_seconds: float = 180.0,
         include_broll: bool = False,
     ) -> List[Dict[str, Any]]:
         """
@@ -980,7 +980,7 @@ class VideoService:
         add_subtitles: bool = True,
         cleanup_settings: Optional[Dict[str, Any]] = None,
         max_short_side: Optional[int] = None,
-        max_clip_seconds: float = 60.0,
+        max_clip_seconds: float = 180.0,
         include_broll: bool = False,
         broll_session: Optional[BRollSession] = None,
     ) -> Optional[Dict[str, Any]]:
