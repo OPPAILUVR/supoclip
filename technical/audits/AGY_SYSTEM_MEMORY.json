@@ -136,7 +136,7 @@
     }
   },
   "performance_feedback_loop": {
-    "last_audit_at": "2026-11-24T16:27:16.623541+00:00",
+    "last_audit_at": "2026-11-24T17:16:52.465966+00:00",
     "total_audited_clips": 12,
     "breakout_winners": [],
     "view_jail_30k_pool": [],
@@ -147,11 +147,11 @@
       "facial_reaction_weight": 0.2
     }
   },
-  "last_system_audit": "2026-11-24T16:26:50.204492+00:00",
-  "last_audit_status": "ATTENTION_REQUIRED",
+  "last_system_audit": "2026-11-24T17:16:46.084661+00:00",
+  "last_audit_status": "PASS",
   "audit_summary": {
-    "workers": false,
-    "storage_gb": 0.15,
+    "workers": true,
+    "storage_gb": 0.38,
     "drafts_in_studio": 0
   }
 }

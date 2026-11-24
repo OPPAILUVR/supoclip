@@ -21,7 +21,7 @@ from ..database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-MEMORY_FILE = Path(__file__).resolve().parent.parent.parent / "AGY_SYSTEM_MEMORY.json"
+MEMORY_FILE = Path(__file__).resolve().parent.parent.parent.parent / "technical" / "audits" / "AGY_SYSTEM_MEMORY.json"
 
 
 class YouTubePerformanceTracker:

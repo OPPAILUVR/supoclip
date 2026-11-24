@@ -370,5 +370,36 @@
         "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
       }
     }
+  },
+  {
+    "timestamp": "2026-11-24T17:16:46.084661+00:00",
+    "overall_status": "PASS",
+    "checklist_version": "2.5.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 30
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 0.38,
+        "retention_policy": "48_hours",
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
   }
 ]

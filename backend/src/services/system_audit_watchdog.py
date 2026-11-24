@@ -25,9 +25,10 @@ logger = logging.getLogger("SystemAuditWatchdog")
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 ROOT_DIR = BACKEND_DIR.parent
-CHECKLIST_FILE = ROOT_DIR / "SYSTEM_MASTER_CHECKLIST.json"
-AUDIT_LOG_FILE = ROOT_DIR / "SYSTEM_AUDIT_LOG.json"
-SYSTEM_MEMORY_FILE = BACKEND_DIR / "AGY_SYSTEM_MEMORY.json"
+AUDITS_DIR = ROOT_DIR / "technical" / "audits"
+CHECKLIST_FILE = AUDITS_DIR / "SYSTEM_MASTER_CHECKLIST.json"
+AUDIT_LOG_FILE = AUDITS_DIR / "SYSTEM_AUDIT_LOG.json"
+SYSTEM_MEMORY_FILE = AUDITS_DIR / "AGY_SYSTEM_MEMORY.json"
 
 
 class SystemAuditWatchdog:
