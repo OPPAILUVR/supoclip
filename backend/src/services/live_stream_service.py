@@ -576,7 +576,7 @@ class LiveStreamService:
         name: str,
         platform: str,
         identifier: str,
-        buffer_minutes: int = 10,
+        buffer_minutes: int = 20,
         min_virality_score: int = 75,
     ) -> Dict[str, Any]:
         """Add a streamer to the watch list."""
@@ -788,7 +788,7 @@ class LiveStreamService:
         platform: str,
         stream_url: str,
         task_id: str,
-        buffer_minutes: int = 10,
+        buffer_minutes: int = 20,
         audio_url: Optional[str] = None,
     ) -> ActiveLiveSession:
         """Start rolling FFmpeg capture into 60s segments.
@@ -1273,8 +1273,10 @@ Respond ONLY with a JSON array of 5 unique, catchy title strings:
         if len(valid_chunks) < 2:
             return []
 
-        # Consider the latest 3-4 completed valid chunks
-        eligible_chunks = valid_chunks[-4:]
+        # Consider the latest 6-8 completed valid chunks (6-8 minute sliding analysis window)
+        # Enables full narrative arc tracking and multi-minute topic shift detection (like @LivestreamsMemes)
+        num_chunks = 8 if len(valid_chunks) >= 8 else len(valid_chunks)
+        eligible_chunks = valid_chunks[-num_chunks:]
 
         # Merge these eligible chunks into a temporary analysis segment
         analysis_dir.mkdir(exist_ok=True)
@@ -1426,6 +1428,20 @@ This collective intelligence is derived from 500+ top-performing clips across al
      * Cut ONLY after a complete, standalone sentence that ends with a period (.), question mark (?), or exclamation mark (!).
      * The viewer MUST hear the full justification, punchline, or reaction resolution.
      * Allow 0.8s - 1.5s of natural pause/laughter decay after the last word so the final syllable is never chopped.
+
+6. TOPIC SHIFT & NARRATIVE BOUNDARY DETECTION (LEARNED FROM @LivestreamsMemes VIRAL STANDARD):
+   Streamers like Asmongold do NOT speak about one topic indefinitely; they cycle through distinct topics, news articles, video reactions, drama takes, and game scenarios. You MUST detect when a topic starts, and when it changes:
+   - TOPIC ENTRY SIGNALS (START OF A NEW STORY ARC):
+     * Asmon introduces a new video/article/tweet/topic: e.g. "Look at this...", "Check this out...", "What is this?", "Wait a minute...", "Let's see what we got here...", "Chat sent me this...", "Did you guys see this?".
+     * Video audio begins playing or Asmon pauses on a new video frame to react.
+     * The clip start_time MUST align with the exact start of this new topic. Do NOT bleed in tail-end chatter from the prior, unrelated topic!
+   - TOPIC EXIT SIGNALS (END OF THE STORY ARC):
+     * Asmon delivers his conclusive verdict, philosophical takeaway, or punchline: e.g. "And that's why...", "That really is what it is.", "Unbelievable, anyway...", "Like a new era, yeah.", "I don't know what else to tell you."
+     * Asmon closes the window, switches tabs, or pivots: "Alright, next one...", "What else do we have?".
+     * The clip end_time MUST conclude on this mic drop, BEFORE he moves to the next topic.
+   - ONE COMPLETE, SELF-CONTAINED NARRATIVE:
+     * Every clip must encapsulate ONE cohesive topic from introduction to resolution.
+     * If Asmon's breakdown takes 60s, 90s, 120s, or 160s, capture that full topic arc (up to 175s)! Do not artificially butcher the story mid-thought.
 
 CRITICAL REQUIREMENT - 100% UNIQUE, CONTENT-SPECIFIC TITLES ("hook_title"):
 The title burned onto the top of the video and shown in the feed MUST FORCE scrolling viewers to click.

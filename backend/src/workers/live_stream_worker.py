@@ -157,8 +157,8 @@ async def process_single_streamer(s: Any) -> None:
                     audio_url=probe.get("audio_url"),
                 )
 
-                # Maintain full 10-minute rolling buffer (10 chunks, 60s each) for rich context
-                LiveStreamService.purge_old_segments(session.buffer_dir, max_segments=max(s.buffer_minutes, 10))
+                # Maintain full 20-minute rolling buffer (20 chunks, 60s each) for rich context and topic-shift detection
+                LiveStreamService.purge_old_segments(session.buffer_dir, max_segments=max(s.buffer_minutes, 20))
 
                 # Run sliding AI moment detection & rendering in parallel
                 clips = await LiveStreamService.evaluate_buffer_for_moments(
