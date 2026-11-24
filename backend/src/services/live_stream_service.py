@@ -31,6 +31,7 @@ from ..media.ffmpeg import ffprobe_video_size, ffprobe_has_audio, subtitles_filt
 from ..utils.motion_analyzer import analyze_visual_actions
 from ..utils.video_metadata import strip_and_embed_video_metadata, get_streamer_tags
 from ..utils.sensory_analyzer import SensoryAnalyzer
+from ..youtube_utils import get_youtube_video_id
 from .thumbnail_generator import generate_viral_thumbnail
 
 logger = logging.getLogger(__name__)
@@ -453,21 +454,28 @@ class LiveStreamService:
             platform = "kick"
 
         if platform == "youtube":
+            clean_id = identifier.strip()
+            # Direct video link (e.g. https://www.youtube.com/watch?v=4JOjgLLAr1o)
+            if "watch?v=" in clean_id or "youtu.be/" in clean_id:
+                vid = get_youtube_video_id(clean_id)
+                if vid:
+                    return f"https://www.youtube.com/watch?v={vid}", f"video_{vid}"
+
             # Match @handle or youtube.com/@handle or channel/UC... or full live link
-            if "youtube.com" in identifier or "youtu.be" in identifier:
-                handle_match = re.search(r"@([a-zA-Z0-9_.-]+)", identifier)
+            if "youtube.com" in clean_id or "youtu.be" in clean_id:
+                handle_match = re.search(r"@([a-zA-Z0-9_.-]+)", clean_id)
                 if handle_match:
                     handle = f"@{handle_match.group(1)}"
-                    url = identifier if "/live" in identifier else f"https://www.youtube.com/{handle}/live"
-                elif "/channel/" in identifier:
-                    chan_match = re.search(r"/channel/([a-zA-Z0-9_.-]+)", identifier)
+                    url = f"https://www.youtube.com/{handle}/live"
+                elif "/channel/" in clean_id:
+                    chan_match = re.search(r"/channel/([a-zA-Z0-9_.-]+)", clean_id)
                     handle = chan_match.group(1) if chan_match else "channel"
-                    url = identifier if "/live" in identifier else f"https://www.youtube.com/channel/{handle}/live"
+                    url = f"https://www.youtube.com/channel/{handle}/live"
                 else:
-                    handle = identifier
-                    url = identifier if "/live" in identifier else f"{identifier.rstrip('/')}/live"
+                    handle = clean_id
+                    url = clean_id if "/live" in clean_id else f"{clean_id.rstrip('/')}/live"
             else:
-                handle = identifier if identifier.startswith("@") else f"@{identifier}"
+                handle = clean_id if clean_id.startswith("@") else f"@{clean_id}"
                 url = f"https://www.youtube.com/{handle}/live"
             return url, handle
 
@@ -485,6 +493,58 @@ class LiveStreamService:
 
         raise ValueError(f"Unsupported platform: {platform}. Supported: youtube, twitch, kick")
 
+    @classmethod
+    def get_youtube_cookies_file(cls) -> Optional[str]:
+        """Ensure Netscape-format cookies file exists and return its path for yt-dlp."""
+        possible_dirs = [
+            Path(__file__).resolve().parent.parent.parent / "browser_data",
+            Path("browser_data"),
+            Path("backend/browser_data"),
+        ]
+
+        for bdir in possible_dirs:
+            if not bdir.exists():
+                continue
+            json_file = bdir / "youtube_cookies.json"
+            txt_file = bdir / "youtube_cookies.txt"
+
+            # Sync JSON cookies to Netscape cookies.txt if JSON is newer or txt doesn't exist/empty
+            if json_file.exists():
+                try:
+                    needs_sync = (
+                        not txt_file.exists()
+                        or txt_file.stat().st_size == 0
+                        or json_file.stat().st_mtime > txt_file.stat().st_mtime
+                    )
+                    if needs_sync:
+                        with open(json_file, "r", encoding="utf-8") as f:
+                            cookies_data = json.load(f)
+                        if isinstance(cookies_data, list) and cookies_data:
+                            lines = ["# Netscape HTTP Cookie File\n"]
+                            for c in cookies_data:
+                                domain = c.get("domain", "")
+                                flag = "TRUE" if domain.startswith(".") else "FALSE"
+                                path = c.get("path", "/")
+                                secure = "TRUE" if c.get("secure", False) else "FALSE"
+                                exp_val = c.get("expires", 0)
+                                if exp_val is None or exp_val <= 0:
+                                    expires = "2147483647"
+                                else:
+                                    expires = str(int(exp_val))
+                                name = c.get("name", "")
+                                value = c.get("value", "")
+                                lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+                            with open(txt_file, "w", encoding="utf-8") as f:
+                                f.writelines(lines)
+                            logger.info("Synchronized %d YouTube cookies to Netscape format at %s", len(cookies_data), txt_file)
+                except Exception as sync_err:
+                    logger.warning("Failed to synchronize youtube_cookies.json to .txt: %s", sync_err)
+
+            if txt_file.exists() and txt_file.stat().st_size > 0:
+                return str(txt_file.resolve())
+
+        return None
+
     @staticmethod
     def probe_live_status(platform: str, channel_url: str) -> Dict[str, Any]:
         """Probe if a streamer is currently live using yt-dlp.
@@ -494,15 +554,25 @@ class LiveStreamService:
         For ANY YouTube live stream, always extracts BOTH the video manifest and the audio manifest
         so FFmpeg captures them simultaneously into a single synchronized container with AAC audio.
         """
+        clean_url = channel_url.strip()
+        if "youtube.com" in clean_url or "youtu.be" in clean_url:
+            if "watch?v=" in clean_url and clean_url.endswith("/live"):
+                clean_url = clean_url.removesuffix("/live")
+
+        cookie_file = LiveStreamService.get_youtube_cookies_file()
+
         ydl_opts = {
             "skip_download": True,
             "quiet": True,
             "no_warnings": True,
             "playlist_items": "1",
         }
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(channel_url, download=False)
+                info = ydl.extract_info(clean_url, download=False)
                 if not info:
                     return {"is_live": False}
 
@@ -514,13 +584,13 @@ class LiveStreamService:
                     
                     is_youtube = (
                         str(platform).lower() == "youtube"
-                        or "youtube.com" in channel_url.lower()
-                        or "youtu.be" in channel_url.lower()
+                        or "youtube.com" in clean_url.lower()
+                        or "youtu.be" in clean_url.lower()
                     )
 
                     if is_youtube and formats:
                         # DEFAULT FOR ALL YOUTUBE LIVE STREAMS:
-                        # YouTube delivers video-only and audio-only HLS tracks.
+                        # YouTube delivers video-only and audio-only HLS tracks, or combined tracks.
                         # Extract the highest resolution video track and highest bitrate audio track.
                         for f in reversed(formats):
                             f_url = f.get("url") or ""
@@ -533,7 +603,7 @@ class LiveStreamService:
                             # Video track: contains video codec
                             if is_m3u8 and vc != "none" and not stream_url:
                                 stream_url = f_url
-                                logger.info("YouTube Live probe: selected video format %s (%s)", f.get("format_id"), res)
+                                logger.info("YouTube Live probe: selected video format %s (%s, vc=%s, ac=%s)", f.get("format_id"), res, vc, ac)
 
                             # Audio track: contains audio stream without video codec, or resolution is audio only
                             if (vc == "none" or "audio" in res.lower() or (ac != "none" and vc == "none")) and not audio_url:
@@ -557,7 +627,7 @@ class LiveStreamService:
                         "is_live": True,
                         "title": info.get("title") or "Live Stream",
                         "stream_id": str(info.get("id") or ""),
-                        "stream_url": stream_url or channel_url,
+                        "stream_url": stream_url or clean_url,
                         "audio_url": audio_url,
                         "is_youtube": is_youtube,
                         "thumbnail": info.get("thumbnail"),
@@ -568,7 +638,7 @@ class LiveStreamService:
             err_str = str(exc).lower()
             if "not currently live" in err_str or "offline" in err_str or "no video" in err_str:
                 return {"is_live": False}
-            logger.debug("yt-dlp live probe failed for %s (%s): %s", channel_url, platform, exc)
+            logger.debug("yt-dlp live probe failed for %s (%s): %s", clean_url, platform, exc)
             return {"is_live": False, "error": str(exc)}
 
     @staticmethod
@@ -1644,7 +1714,7 @@ Every single title MUST be completely unique, novel, and specific to what actual
    - Viewers scroll past long sentences in 0.4s. Keep it punchy, visceral, and readable at a glance.
    - Plain text only. NO quotes, NO hashtags, NO emojis.
 
-Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 virality):
+Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds {min_virality} virality):
 [
   {{
     "start_time": "MM:SS",
@@ -1689,7 +1759,6 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
             moment_key = f"{start_str}_{end_str}"
             if moment_key in session.analyzed_timestamps:
                 continue
-            session.analyzed_timestamps.add(moment_key)
 
             # Convert MM:SS to seconds
             def _to_sec(t_str: str) -> float:
@@ -2053,6 +2122,7 @@ Respond ONLY with a JSON array of objects (or empty [] if no moment exceeds 75 v
                 )
 
             logger.info("Successfully generated live clip: %s (Virality %s)", clip_filename, score)
+            session.analyzed_timestamps.add(moment_key)
             session.last_clipped_time = time.time()
             generated_clips.append({"clip_id": clip_id, "filename": clip_filename, **moment})
             # Anti-Spam Gate: Produce at most 1 clip per evaluation window

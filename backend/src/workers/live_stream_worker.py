@@ -27,6 +27,9 @@ logger = logging.getLogger("live_stream_worker")
 _processing_streamers: set[str] = set()
 _processing_lock = asyncio.Lock()
 
+# Track consecutive offline checks per streamer to prevent premature stream termination on transient errors
+_offline_counts: dict[str, int] = {}
+
 
 async def process_single_streamer(s: Any) -> None:
     """Analyze and clip an individual streamer independently with its own DB session."""
@@ -49,9 +52,13 @@ async def process_single_streamer(s: Any) -> None:
                 LiveStreamService.probe_live_status, s.platform, s.channel_url
             )
             currently_live = probe.get("is_live", False)
+            probe_error = probe.get("error")
             stream_title = probe.get("title") or s.current_stream_title or "Live Stream"
             stream_url = probe.get("stream_url") or s.current_stream_url
             stream_id = probe.get("stream_id")
+
+            if currently_live:
+                _offline_counts.pop(streamer_id, None)
 
             if currently_live and not s.is_live:
                 # Streamer JUST WENT LIVE!
@@ -170,30 +177,63 @@ async def process_single_streamer(s: Any) -> None:
                     logger.info("Generated %d new clips for %s live stream!", len(clips), streamer_name)
 
             elif not currently_live and s.is_live:
-                # Streamer just WENT OFFLINE
-                logger.info("Streamer %s (%s) has ended their live stream", streamer_name, s.platform)
-                LiveStreamService.stop_buffer_recording(s.id)
-
-                await db.execute(
-                    text("""
-                        UPDATE live_streamers
-                        SET is_live = false,
-                            current_stream_url = null,
-                            last_checked_at = :now
-                        WHERE id = :id
-                    """),
-                    {"id": s.id, "now": now},
-                )
-                if s.current_task_id:
-                    await db.execute(
-                        text("UPDATE tasks SET status = 'completed', progress = 100, progress_message = 'Live stream ended' WHERE id = :tid"),
-                        {"tid": s.current_task_id},
+                # Streamer reported not live, but was marked live before.
+                if probe_error:
+                    logger.warning(
+                        "Streamer %s (%s) live probe returned an error (%s); preserving active live session & buffer recording.",
+                        streamer_name,
+                        s.platform,
+                        probe_error,
                     )
-                await db.commit()
+                    await db.execute(
+                        text("UPDATE live_streamers SET last_checked_at = :now WHERE id = :id"),
+                        {"id": s.id, "now": now},
+                    )
+                    await db.commit()
+                else:
+                    cnt = _offline_counts.get(streamer_id, 0) + 1
+                    _offline_counts[streamer_id] = cnt
+                    if cnt < 3:
+                        logger.info(
+                            "Streamer %s (%s) reported offline (%d/3 checks). Waiting for consecutive confirmation before ending.",
+                            streamer_name,
+                            s.platform,
+                            cnt,
+                        )
+                        await db.execute(
+                            text("UPDATE live_streamers SET last_checked_at = :now WHERE id = :id"),
+                            {"id": s.id, "now": now},
+                        )
+                        await db.commit()
+                    else:
+                        logger.info(
+                            "Streamer %s (%s) has ended their live stream (confirmed 3 consecutive checks)",
+                            streamer_name,
+                            s.platform,
+                        )
+                        _offline_counts.pop(streamer_id, None)
+                        LiveStreamService.stop_buffer_recording(s.id)
 
-                await LiveStreamService.record_event(
-                    db, s.id, "stream_ended", title=s.current_stream_title, task_id=s.current_task_id
-                )
+                        await db.execute(
+                            text("""
+                                UPDATE live_streamers
+                                SET is_live = false,
+                                    current_stream_url = null,
+                                    last_checked_at = :now
+                                WHERE id = :id
+                            """),
+                            {"id": s.id, "now": now},
+                        )
+                        if s.current_task_id:
+                            await db.execute(
+                                text("UPDATE tasks SET status = 'completed', progress = 100, progress_message = 'Live stream ended' WHERE id = :tid"),
+                                {"tid": s.current_task_id},
+                            )
+                        await db.commit()
+
+                        await LiveStreamService.record_event(
+                            db, s.id, "stream_ended", title=s.current_stream_title, task_id=s.current_task_id
+                        )
 
             else:
                 # OFFLINE and was OFFLINE -> update last_checked_at
