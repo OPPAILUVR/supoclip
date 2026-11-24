@@ -14,11 +14,26 @@ STREAMER_TAGS = {
     "botez": ["#botez", "#botezlive", "#botezsisters", "#alexandrabotez", "#andreabotez"],
     "xqc": ["#xqc", "#xqcow", "#xqcclips", "#xqcreacts", "#xqcdrama", "#juicer"],
     "asmongold": ["#asmongold", "#zackrawrr", "#asmon", "#asmonreacts", "#asmongoldclips"],
+    "asmong": ["#asmongold", "#zackrawrr", "#asmon", "#asmonreacts", "#asmongoldclips"],
     "adin": ["#adinross", "#adin", "#adinlive", "#adinclips"],
-    "kai": ["#kaicenat", "#kai", "#kaiclips", "#mafiathon", "#amp", "#kaicenatrage"]
+    "kai": ["#kaicenat", "#kai", "#kaiclips", "#mafiathon", "#amp", "#kaicenatrage"],
+    "caseoh": ["#caseoh", "#caseohgames", "#caseohclips", "#caseohrage", "#caseohfunny"],
+    "caseoh_": ["#caseoh", "#caseohgames", "#caseohclips", "#caseohrage", "#caseohfunny"],
 }
 
 STREAMER_PROFILES = {
+    "caseoh": {
+        "display_name": "CaseOh",
+        "handle": "@caseoh_",
+        "youtube": "@CaseOh_",
+        "url": "https://www.twitch.tv/caseoh_"
+    },
+    "caseoh_": {
+        "display_name": "CaseOh",
+        "handle": "@caseoh_",
+        "youtube": "@CaseOh_",
+        "url": "https://www.twitch.tv/caseoh_"
+    },
     "asmong": {
         "display_name": "Asmongold (Zackrawrr)",
         "handle": "@zackrawrr",

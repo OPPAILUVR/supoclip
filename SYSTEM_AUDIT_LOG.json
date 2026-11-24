@@ -122,5 +122,160 @@
         "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
       }
     }
+  },
+  {
+    "timestamp": "2026-11-23T19:55:09.837691+00:00",
+    "overall_status": "ATTENTION_REQUIRED",
+    "checklist_version": "2.4.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 0
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 1.19,
+        "hard_ceiling_gb": 10.0,
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
+  },
+  {
+    "timestamp": "2026-11-23T22:55:27.538812+00:00",
+    "overall_status": "PASS",
+    "checklist_version": "2.4.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 30
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 1.68,
+        "hard_ceiling_gb": 10.0,
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
+  },
+  {
+    "timestamp": "2026-11-24T01:55:46.184908+00:00",
+    "overall_status": "ATTENTION_REQUIRED",
+    "checklist_version": "2.4.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 0
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 2.63,
+        "hard_ceiling_gb": 10.0,
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
+  },
+  {
+    "timestamp": "2026-11-24T04:55:58.659263+00:00",
+    "overall_status": "PASS",
+    "checklist_version": "2.4.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 30
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 1.7,
+        "hard_ceiling_gb": 10.0,
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
+  },
+  {
+    "timestamp": "2026-11-24T07:42:33.554071+00:00",
+    "overall_status": "PASS",
+    "checklist_version": "2.4.0",
+    "audits": {
+      "zero_drafts_policy": {
+        "passed": true,
+        "drafts_found": 0,
+        "drafts_purged": 0
+      },
+      "youtube_studio_visibility": {
+        "passed": true,
+        "videos_inspected": 30
+      },
+      "storage_quota_ceiling": {
+        "passed": true,
+        "total_media_gb": 1.99,
+        "hard_ceiling_gb": 10.0,
+        "auto_evicted_bytes": 0
+      },
+      "background_workers": {
+        "passed": true,
+        "live_stream_worker": "running",
+        "youtube_upload_worker": "running"
+      },
+      "virality_calibration_matrix": {
+        "passed": true,
+        "matrix_file": "/Users/luv/.gemini/antigravity/scratch/supoclip/research/benchmark_bank/ground_truth_calibration_matrix.json"
+      }
+    }
   }
 ]
